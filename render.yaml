@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: presidential-newsroom
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_PATH
+        value: /var/data/newsroom.db
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_NAME
+        value: Managing Editor
+      - key: ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: newsroom-data
+      mountPath: /var/data
+      sizeGB: 1

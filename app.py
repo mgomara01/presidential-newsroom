@@ -1,19 +1,25 @@
 import os
 import re
 import sqlite3
+import secrets
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
 from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-secret-in-production')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 12 * 1024 * 1024
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
+csrf = CSRFProtect(app)
 
 WORKFLOW = ['Received', 'Under Review', 'Research', 'Fact Check', 'Approved', 'Scheduled', 'Published', 'Held', 'Declined']
 CATEGORIES = [
@@ -29,7 +35,18 @@ def db():
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.execute('PRAGMA foreign_keys = ON')
+        g.db.execute('PRAGMA journal_mode = WAL')
+        g.db.execute('PRAGMA busy_timeout = 5000')
     return g.db
+
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    return response
 
 
 @app.teardown_appcontext
@@ -130,8 +147,15 @@ def init_db():
     ''')
     now = datetime.now(UTC).isoformat()
     if not conn.execute('SELECT 1 FROM users LIMIT 1').fetchone():
+        admin_email = os.environ.get('ADMIN_EMAIL', 'editor@society.local').lower().strip()
+        admin_name = os.environ.get('ADMIN_NAME', 'Managing Editor').strip()
+        admin_password = os.environ.get('ADMIN_PASSWORD')
+        if not admin_password:
+            if os.environ.get('APP_ENV') == 'production':
+                raise RuntimeError('ADMIN_PASSWORD is required in production')
+            admin_password = 'ChangeMe123!'
         conn.execute('INSERT INTO users(email,name,password_hash,role) VALUES(?,?,?,?)',
-                     ('editor@society.local', 'Managing Editor', generate_password_hash('ChangeMe123!'), 'admin'))
+                     (admin_email, admin_name, generate_password_hash(admin_password), 'admin'))
     if not conn.execute('SELECT 1 FROM stories LIMIT 1').fetchone():
         samples = [
             ('A New Digital Chapter for Presidential Legacy', 'The Society launches an editorial platform designed to preserve family perspectives and connect them with rigorous historical scholarship.',
@@ -181,6 +205,16 @@ def inject_globals():
     return {'CATEGORIES': CATEGORIES, 'WORKFLOW': WORKFLOW, 'current_year': datetime.now(UTC).year}
 
 
+@app.route('/health')
+def health():
+    try:
+        db().execute('SELECT 1').fetchone()
+        return {'status': 'ok'}, 200
+    except sqlite3.Error:
+        app.logger.exception('Database health check failed')
+        return {'status': 'error'}, 503
+
+
 @app.route('/')
 def home():
     featured = db().execute("SELECT * FROM stories WHERE publication_status='Published' ORDER BY featured DESC, published_at DESC LIMIT 1").fetchone()
@@ -217,7 +251,7 @@ def story(slug):
 
 @app.route('/issues/<int:issue_id>')
 def issue(issue_id):
-    item = db().execute('SELECT * FROM issues WHERE id=?', (issue_id,)).fetchone()
+    item = db().execute("SELECT * FROM issues WHERE id=? AND (status='Published' OR ?=1)", (issue_id, 1 if session.get('user_id') else 0)).fetchone()
     if not item:
         return ('Not found', 404)
     stories = db().execute('''SELECT s.*, i.section_name, i.position FROM issue_stories i JOIN stories s ON s.id=i.story_id
@@ -234,7 +268,7 @@ def submit():
             flash('Complete all required fields and certify publication rights.', 'error')
             return render_template('submit.html', form=request.form)
         now = datetime.now(UTC)
-        tracking = f"SPD-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}"
+        tracking = f"SPD-{now.strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
         cur = db().execute('''INSERT INTO submissions(tracking_code,contributor_name,contributor_email,relationship,category,presidential_connection,proposed_headline,summary,full_narrative,event_date,location,sources,photo_caption,photo_credit,rights_certified,privacy_level,embargo_date,status,created_at,updated_at)
                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                            (tracking, request.form['contributor_name'].strip(), request.form['contributor_email'].strip(), request.form['relationship'], request.form['category'], request.form.get('presidential_connection','').strip(), request.form.get('proposed_headline','').strip(), request.form['summary'].strip(), request.form.get('full_narrative','').strip(), request.form.get('event_date',''), request.form.get('location','').strip(), request.form.get('sources','').strip(), request.form.get('photo_caption','').strip(), request.form.get('photo_credit','').strip(), 1, request.form.get('privacy_level','Public'), request.form.get('embargo_date',''), 'Received', now.isoformat(), now.isoformat()))
@@ -250,7 +284,8 @@ def login():
         user = db().execute('SELECT * FROM users WHERE email=?', (request.form.get('email','').lower().strip(),)).fetchone()
         if user and check_password_hash(user['password_hash'], request.form.get('password','')):
             session.clear(); session['user_id'] = user['id']; session['user_name'] = user['name']; session['role'] = user['role']
-            return redirect(request.args.get('next') or url_for('dashboard'))
+            next_url = request.args.get('next', '')
+            return redirect(next_url if next_url.startswith('/') and not next_url.startswith('//') else url_for('dashboard'))
         flash('Invalid credentials.', 'error')
     return render_template('login.html')
 

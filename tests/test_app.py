@@ -13,7 +13,7 @@ class NewsroomTestCase(unittest.TestCase):
         os.environ["DATABASE_PATH"] = str(cls.db_path)
         os.environ["SECRET_KEY"] = "test-secret"
         cls.module = importlib.import_module("app")
-        cls.module.app.config.update(TESTING=True)
+        cls.module.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
 
     @classmethod
     def tearDownClass(cls):
@@ -28,6 +28,19 @@ class NewsroomTestCase(unittest.TestCase):
             data={"email": "editor@society.local", "password": "ChangeMe123!"},
             follow_redirects=False,
         )
+
+    def test_health(self):
+        response = self.client.get('/health')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['status'], 'ok')
+
+    def test_login_rejects_external_redirect(self):
+        response = self.client.post('/login?next=//evil.example', data={
+            'email': 'editor@society.local',
+            'password': 'ChangeMe123!',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.location.endswith('/editor'))
 
     def test_public_routes(self):
         for path in ["/", "/archive", "/submit", "/login"]:
