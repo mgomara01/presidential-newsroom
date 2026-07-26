@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import secrets
+import threading
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -21,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
 ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
-APP_VERSION = '4.0.0'
+APP_VERSION = '4.1.0'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -524,23 +525,76 @@ def portal_document_new():
         db().execute("INSERT INTO portal_documents(title,description,file_url,category,audience,created_at) VALUES(?,?,?,?,?,?)",(request.form['title'].strip(),request.form.get('description',''),request.form.get('file_url',''),request.form.get('category','Governance'),request.form.get('audience','Members'),datetime.now(UTC).isoformat())); db().commit(); flash('Document added.','success'); return redirect(url_for('portal_home'))
     return render_template('portal_admin.html',mode='document')
 
-@app.route('/editor/research',methods=['GET','POST'])
+def run_research_request(request_id, question, scope):
+    key = os.environ.get('OPENAI_API_KEY')
+    now = datetime.now(UTC).isoformat()
+    try:
+        if not key or not OpenAI:
+            output = ("AI research is installed but not activated. Add OPENAI_API_KEY in Render.\n\n"
+                      f"Research packet: {question}\nScope: {scope}\n"
+                      "Suggested repositories: National Archives, Library of Congress, presidential libraries, "
+                      "Founders Online, Chronicling America, and relevant state historical societies.")
+            status = 'Needs API Key'
+        else:
+            client = OpenAI(api_key=key, timeout=90.0, max_retries=1)
+            prompt = ("You are the Society for Presidential Descendants research assistant. Produce a "
+                      "source-conscious brief with chronology, key people, primary-source leads, citations, "
+                      "and unresolved questions. Clearly separate fact from interpretation.\n\n"
+                      f"Question: {question}\nScope: {scope}")
+            response = client.responses.create(
+                model=os.environ.get('OPENAI_MODEL', 'gpt-5'),
+                tools=[{'type': 'web_search'}],
+                input=prompt,
+            )
+            output = response.output_text
+            status = 'Completed'
+    except Exception as exc:
+        app.logger.exception('Background research request failed')
+        output = 'Research service error: ' + str(exc)
+        status = 'Error'
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('PRAGMA busy_timeout = 5000')
+        conn.execute('UPDATE research_requests SET status=?,result=?,updated_at=? WHERE id=?',
+                     (status, output, now, request_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.route('/editor/research', methods=['GET', 'POST'])
 @admin_required
 def research_assistant():
-    result=None
-    if request.method=='POST':
-        question=request.form['question'].strip(); scope=request.form.get('scope',''); now=datetime.now(UTC).isoformat(); key=os.environ.get('OPENAI_API_KEY')
-        if key and OpenAI:
-            try:
-                client=OpenAI(api_key=key, timeout=75.0, max_retries=1); prompt="You are the Society for Presidential Descendants research assistant. Produce a source-conscious brief with chronology, key people, primary-source leads, citations, and unresolved questions. Clearly separate fact from interpretation.\n\nQuestion: "+question+"\nScope: "+scope
-                response=client.responses.create(model=os.environ.get('OPENAI_MODEL','gpt-5'),tools=[{'type':'web_search'}],input=prompt); output=response.output_text; status='Completed'
-            except Exception as exc:
-                app.logger.exception('Research request failed'); output='Research service error: '+str(exc); status='Error'
-        else:
-            output="AI research is installed but not activated. Add OPENAI_API_KEY in Render.\n\nResearch packet: "+question+"\nScope: "+scope+"\nSuggested repositories: National Archives, Library of Congress, presidential libraries, Founders Online, Chronicling America, and relevant state historical societies."; status='Needs API Key'
-        cur=db().execute("INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(session['user_id'],question,scope,status,output,now,now)); db().commit(); audit('Created','research_request',cur.lastrowid,status); result=db().execute('SELECT * FROM research_requests WHERE id=?',(cur.lastrowid,)).fetchone()
-    history=db().execute('SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20').fetchall()
-    return render_template('research.html',result=result,history=history,enabled=bool(os.environ.get('OPENAI_API_KEY')))
+    if request.method == 'POST':
+        question = request.form['question'].strip()
+        scope = request.form.get('scope', '')
+        now = datetime.now(UTC).isoformat()
+        enabled = bool(os.environ.get('OPENAI_API_KEY')) and OpenAI is not None
+        status = 'In Progress' if enabled else 'Needs API Key'
+        initial_result = ('Research is running in the background.' if enabled else
+                          'AI research is installed but not activated. Add OPENAI_API_KEY in Render.\n\n'
+                          f'Research packet: {question}\nScope: {scope}\n'
+                          'Suggested repositories: National Archives, Library of Congress, presidential libraries, '
+                          'Founders Online, Chronicling America, and relevant state historical societies.')
+        cur = db().execute(
+            "INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (session['user_id'], question, scope, status, initial_result, now, now),
+        )
+        db().commit()
+        request_id = cur.lastrowid
+        audit('Created', 'research_request', request_id, status)
+        if enabled:
+            threading.Thread(
+                target=run_research_request,
+                args=(request_id, question, scope),
+                daemon=True,
+                name=f'research-{request_id}',
+            ).start()
+        return redirect(url_for('research_assistant', request_id=request_id))
+    request_id = request.args.get('request_id', type=int)
+    result = db().execute('SELECT * FROM research_requests WHERE id=?', (request_id,)).fetchone() if request_id else None
+    history = db().execute('SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20').fetchall()
+    return render_template('research.html', result=result, history=history, enabled=bool(os.environ.get('OPENAI_API_KEY')))
 
 
 @app.route('/editor/audit')
