@@ -6,12 +6,17 @@ from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_from_directory, session, url_for
 from flask_wtf.csrf import CSRFProtect
+import bleach
+import markdown
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
+UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
+ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -20,6 +25,7 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
 csrf = CSRFProtect(app)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 WORKFLOW = ['Received', 'Under Review', 'Research', 'Fact Check', 'Approved', 'Scheduled', 'Published', 'Held', 'Declined']
 CATEGORIES = [
@@ -59,6 +65,20 @@ def close_db(_exc=None):
 def slugify(text):
     text = re.sub(r'[^a-zA-Z0-9\s-]', '', text).strip().lower()
     return re.sub(r'[-\s]+', '-', text) or 'story'
+
+
+def allowed_upload(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_UPLOADS
+
+
+def render_markdown(value):
+    raw = markdown.markdown(value or '', extensions=['extra','sane_lists'])
+    tags = set(bleach.sanitizer.ALLOWED_TAGS) | {'p','h1','h2','h3','h4','pre','code','blockquote','hr','br','img','table','thead','tbody','tr','th','td'}
+    attrs = {'a':['href','title','target','rel'], 'img':['src','alt','title'], '*':['class']}
+    return bleach.clean(raw, tags=tags, attributes=attrs, protocols={'http','https','mailto'}, strip=True)
+
+
+app.jinja_env.filters['markdown'] = render_markdown
 
 
 def init_db():
@@ -143,6 +163,17 @@ def init_db():
         entity_id INTEGER,
         details TEXT,
         created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        story_id INTEGER NOT NULL,
+        filename TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        mime_type TEXT,
+        caption TEXT,
+        credit TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(story_id) REFERENCES stories(id) ON DELETE CASCADE
     );
     ''')
     now = datetime.now(UTC).isoformat()
@@ -246,7 +277,14 @@ def story(slug):
     if not item:
         return ('Not found', 404)
     related = db().execute("SELECT * FROM stories WHERE publication_status='Published' AND category=? AND id!=? ORDER BY published_at DESC LIMIT 3", (item['category'], item['id'])).fetchall()
-    return render_template('story.html', story=item, related=related)
+    attachments = db().execute('SELECT * FROM attachments WHERE story_id=? ORDER BY id', (item['id'],)).fetchall()
+    return render_template('story.html', story=item, related=related, attachments=attachments)
+
+
+
+@app.route('/media/<path:filename>')
+def media(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
 
 
 @app.route('/issues/<int:issue_id>')
@@ -346,10 +384,40 @@ def edit_story(item_id=None):
             else:
                 cur=db().execute('''INSERT INTO stories(slug,title,deck,body,category,author,president_tags,topic_tags,source_notes,fact_check_status,rights_status,publication_status,published_at,featured,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', values+(now,))
                 sid=cur.lastrowid; action='Created'
-            db().commit(); audit(action,'story',sid,title); flash('Story saved.','success'); return redirect(url_for('edit_story', item_id=sid))
+            db().commit()
+            for uploaded in request.files.getlist('attachments'):
+                if uploaded and uploaded.filename:
+                    if not allowed_upload(uploaded.filename):
+                        flash(f'Unsupported file type: {uploaded.filename}', 'error')
+                        continue
+                    original = secure_filename(uploaded.filename)
+                    ext = original.rsplit('.',1)[1].lower()
+                    stored = f'{sid}-{secrets.token_hex(8)}.{ext}'
+                    uploaded.save(UPLOAD_DIR / stored)
+                    db().execute('INSERT INTO attachments(story_id,filename,original_name,mime_type,caption,credit,created_at) VALUES(?,?,?,?,?,?,?)',
+                                 (sid,stored,original,uploaded.mimetype,request.form.get('attachment_caption','').strip(),request.form.get('attachment_credit','').strip(),now))
+                    db().commit(); audit('Uploaded','attachment',sid,original)
+            audit(action,'story',sid,title); flash('Story saved.','success'); return redirect(url_for('edit_story', item_id=sid))
         except sqlite3.IntegrityError:
             flash('That URL slug is already in use.','error')
-    return render_template('edit_story.html', item=item)
+    attachments = db().execute('SELECT * FROM attachments WHERE story_id=? ORDER BY id DESC', (item_id,)).fetchall() if item_id else []
+    return render_template('edit_story.html', item=item, attachments=attachments)
+
+
+@app.route('/editor/attachment/<int:attachment_id>/delete', methods=['POST'])
+@login_required
+def delete_attachment(attachment_id):
+    item = db().execute('SELECT * FROM attachments WHERE id=?', (attachment_id,)).fetchone()
+    if not item:
+        abort(404)
+    path = UPLOAD_DIR / item['filename']
+    db().execute('DELETE FROM attachments WHERE id=?', (attachment_id,))
+    db().commit()
+    if path.exists():
+        path.unlink()
+    audit('Deleted','attachment',attachment_id,item['original_name'])
+    flash('Attachment deleted.','success')
+    return redirect(url_for('edit_story', item_id=item['story_id']))
 
 
 @app.route('/editor/issue/new', methods=['GET','POST'])

@@ -1,4 +1,5 @@
 import importlib
+import io
 import os
 import tempfile
 import unittest
@@ -105,6 +106,40 @@ class NewsroomTestCase(unittest.TestCase):
         )
         self.assertEqual(issue_response.status_code, 302)
         self.assertIn("/editor/issue/", issue_response.location)
+
+    def test_markdown_is_rendered_and_script_removed(self):
+        rendered = self.module.render_markdown("## Heading\n\n<script>alert(1)</script>**Bold**")
+        self.assertIn("<h2>Heading</h2>", rendered)
+        self.assertIn("<strong>Bold</strong>", rendered)
+        self.assertNotIn("<script>", rendered)
+
+    def test_story_attachment_upload_and_public_access(self):
+        self.login()
+        response = self.client.post(
+            "/editor/story/new",
+            data={
+                "title": "Story With Attachment",
+                "body": "Attachment test",
+                "category": "Society News",
+                "publication_status": "Published",
+                "fact_check_status": "Verified",
+                "rights_status": "Cleared",
+                "attachments": (io.BytesIO(b"fake image bytes"), "portrait.jpg"),
+                "attachment_caption": "Test portrait",
+                "attachment_credit": "Test archive",
+            },
+            content_type="multipart/form-data",
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+        with self.module.app.app_context():
+            attachment = self.module.db().execute(
+                "SELECT * FROM attachments ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(attachment)
+            media = self.client.get(f"/media/{attachment['filename']}")
+            self.assertEqual(media.status_code, 200)
+            media.close()
 
 
 if __name__ == "__main__":

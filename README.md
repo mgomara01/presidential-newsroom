@@ -75,3 +75,11 @@ The database already includes `ai_notes`, source notes, fact-check status and wo
 - Issue production editor
 
 No agent should directly publish. The `Published` state remains a human editorial decision.
+
+## Version 2 editorial features
+- Markdown-based rich story editor with formatting toolbar
+- Sanitized HTML rendering for public articles
+- Image, PDF, and Word-document attachments
+- Persistent media storage compatible with the Render disk
+- Attachment captions, credits, public links, and editor deletion
+- Migration-safe `attachments` table created automatically
