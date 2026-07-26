@@ -34,7 +34,7 @@ class NewsroomTestCase(unittest.TestCase):
         response = self.client.get('/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'ok')
-        self.assertEqual(response.get_json()['version'], '2.0.0')
+        self.assertEqual(response.get_json()['version'], '4.0.0')
 
     def test_login_rejects_external_redirect(self):
         response = self.client.post('/login?next=//evil.example', data={
@@ -141,6 +141,42 @@ class NewsroomTestCase(unittest.TestCase):
             media = self.client.get(f"/media/{attachment['filename']}")
             self.assertEqual(media.status_code, 200)
             media.close()
+
+
+    def test_portal_requires_login_and_loads(self):
+        self.assertEqual(self.client.get('/portal').status_code, 302)
+        self.login()
+        response=self.client.get('/portal')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Society Portal', response.data)
+
+    def test_portal_admin_creates_member_event_document(self):
+        self.login()
+        r=self.client.post('/editor/portal/member/new',data={'full_name':'Test Descendant','presidential_connection':'Test President','city':'Tampa','state':'FL','visibility':'Members'},follow_redirects=False)
+        self.assertEqual(r.status_code,302)
+        r=self.client.post('/editor/portal/event/new',data={'title':'Annual Gathering','starts_at':'2026-10-10T10:00','location':'Washington'},follow_redirects=False)
+        self.assertEqual(r.status_code,302)
+        r=self.client.post('/editor/portal/document/new',data={'title':'Board Minutes','file_url':'https://example.com/minutes.pdf'},follow_redirects=False)
+        self.assertEqual(r.status_code,302)
+        self.assertIn(b'Test Descendant',self.client.get('/portal/directory').data)
+
+    def test_research_assistant_graceful_without_api_key(self):
+        self.login()
+        os.environ.pop('OPENAI_API_KEY',None)
+        r=self.client.post('/editor/research',data={'question':'What primary sources document the event?','scope':'Early republic'},follow_redirects=True)
+        self.assertEqual(r.status_code,200)
+        self.assertIn(b'Needs API Key',r.data)
+        self.assertIn(b'National Archives',r.data)
+
+
+    def test_member_can_use_portal_but_not_editor(self):
+        self.login()
+        self.client.post('/editor/portal/member/new',data={'full_name':'Portal Member','email':'member@example.com','password':'MemberPass123!','visibility':'Members'})
+        self.client.get('/logout')
+        response=self.client.post('/login',data={'email':'member@example.com','password':'MemberPass123!'},follow_redirects=False)
+        self.assertEqual(response.status_code,302)
+        self.assertEqual(self.client.get('/portal').status_code,200)
+        self.assertEqual(self.client.get('/editor').status_code,403)
 
 
 if __name__ == "__main__":

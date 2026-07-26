@@ -4,3 +4,4 @@ Werkzeug==3.0.3
 Flask-WTF==1.2.2
 markdown==3.8.2
 bleach==6.2.0
+openai>=1.99.0,<2.0.0

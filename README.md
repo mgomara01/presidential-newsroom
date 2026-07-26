@@ -83,3 +83,18 @@ No agent should directly publish. The `Published` state remains a human editoria
 - Persistent media storage compatible with the Render disk
 - Attachment captions, credits, public links, and editor deletion
 - Migration-safe `attachments` table created automatically
+
+
+## Version 3 — Society Portal
+
+- Members-only portal and searchable descendant/member directory
+- Role-separated member and administrator logins
+- Society events, governance-document links, committees, biographies, and non-binding donation pledges
+- Administrator workflows for creating member accounts, events, and portal documents
+
+## Version 4 — AI Research Assistant
+
+- Source-conscious presidential-history research requests and saved history
+- OpenAI Responses API integration with built-in web search when `OPENAI_API_KEY` is configured
+- Graceful research-packet mode when the API key is absent
+- Research prompts require chronology, primary-source leads, citations, and explicit separation of fact, interpretation, and unresolved questions
