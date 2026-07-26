@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
 ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
+APP_VERSION = '2.0.0'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -240,7 +241,7 @@ def inject_globals():
 def health():
     try:
         db().execute('SELECT 1').fetchone()
-        return {'status': 'ok'}, 200
+        return {'status': 'ok', 'version': APP_VERSION}, 200
     except sqlite3.Error:
         app.logger.exception('Database health check failed')
         return {'status': 'error'}, 503
