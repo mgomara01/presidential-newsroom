@@ -3,7 +3,7 @@ import re
 import sqlite3
 import secrets
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -22,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
 ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
-APP_VERSION = '4.1.0'
+APP_VERSION = '4.1.1'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -232,6 +232,11 @@ def init_db():
         for pos, row in enumerate(conn.execute('SELECT id, category FROM stories ORDER BY featured DESC, id').fetchall(), start=1):
             conn.execute('INSERT INTO issue_stories(issue_id,story_id,position,section_name) VALUES(?,?,?,?)',
                          (issue_id, row[0], pos, row[1]))
+    stale_cutoff = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+    conn.execute(
+        "UPDATE research_requests SET status='Error', result='Research did not complete because the application restarted. Please submit the request again.', updated_at=? WHERE status='In Progress' AND updated_at<?",
+        (now, stale_cutoff),
+    )
     conn.commit()
     conn.close()
 
