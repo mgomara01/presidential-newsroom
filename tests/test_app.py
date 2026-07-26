@@ -169,6 +169,54 @@ class NewsroomTestCase(unittest.TestCase):
         self.assertIn(b'National Archives',r.data)
 
 
+
+    def test_research_runs_in_background_without_blocking_request(self):
+        import time
+
+        class FakeResponse:
+            output_text = "Completed research packet"
+
+        class FakeResponses:
+            def create(self, **_kwargs):
+                time.sleep(0.15)
+                return FakeResponse()
+
+        class FakeOpenAI:
+            def __init__(self, **_kwargs):
+                self.responses = FakeResponses()
+
+        self.login()
+        original_openai = self.module.OpenAI
+        os.environ['OPENAI_API_KEY'] = 'test-key'
+        self.module.OpenAI = FakeOpenAI
+        try:
+            started = time.monotonic()
+            response = self.client.post(
+                '/editor/research',
+                data={'question': 'Background test', 'scope': 'Test scope'},
+                follow_redirects=False,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(response.status_code, 302)
+            self.assertLess(elapsed, 0.5)
+            request_id = int(response.location.rsplit('=', 1)[1])
+            deadline = time.monotonic() + 3
+            row = None
+            while time.monotonic() < deadline:
+                with self.module.app.app_context():
+                    row = self.module.db().execute(
+                        'SELECT * FROM research_requests WHERE id=?', (request_id,)
+                    ).fetchone()
+                if row and row['status'] == 'Completed':
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(row)
+            self.assertEqual(row['status'], 'Completed')
+            self.assertEqual(row['result'], 'Completed research packet')
+        finally:
+            self.module.OpenAI = original_openai
+            os.environ.pop('OPENAI_API_KEY', None)
+
     def test_member_can_use_portal_but_not_editor(self):
         self.login()
         self.client.post('/editor/portal/member/new',data={'full_name':'Portal Member','email':'member@example.com','password':'MemberPass123!','visibility':'Members'})
