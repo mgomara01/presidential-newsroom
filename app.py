@@ -532,7 +532,7 @@ def research_assistant():
         question=request.form['question'].strip(); scope=request.form.get('scope',''); now=datetime.now(UTC).isoformat(); key=os.environ.get('OPENAI_API_KEY')
         if key and OpenAI:
             try:
-                client=OpenAI(api_key=key); prompt="You are the Society for Presidential Descendants research assistant. Produce a source-conscious brief with chronology, key people, primary-source leads, citations, and unresolved questions. Clearly separate fact from interpretation.\n\nQuestion: "+question+"\nScope: "+scope
+                client=OpenAI(api_key=key, timeout=75.0, max_retries=1); prompt="You are the Society for Presidential Descendants research assistant. Produce a source-conscious brief with chronology, key people, primary-source leads, citations, and unresolved questions. Clearly separate fact from interpretation.\n\nQuestion: "+question+"\nScope: "+scope
                 response=client.responses.create(model=os.environ.get('OPENAI_MODEL','gpt-5'),tools=[{'type':'web_search'}],input=prompt); output=response.output_text; status='Completed'
             except Exception as exc:
                 app.logger.exception('Research request failed'); output='Research service error: '+str(exc); status='Error'
