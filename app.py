@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
 ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
-APP_VERSION = '5.0.0'
+APP_VERSION = '6.0.0'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -199,6 +199,12 @@ def init_db():
     columns = {row[1] for row in conn.execute('PRAGMA table_info(research_requests)').fetchall()}
     if 'response_id' not in columns:
         conn.execute('ALTER TABLE research_requests ADD COLUMN response_id TEXT')
+    if 'deadline_at' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN deadline_at TEXT')
+    if 'poll_errors' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN poll_errors INTEGER NOT NULL DEFAULT 0')
+    if 'last_error' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN last_error TEXT')
     now = datetime.now(UTC).isoformat()
     if not conn.execute('SELECT 1 FROM users LIMIT 1').fetchone():
         admin_email = os.environ.get('ADMIN_EMAIL', 'editor@society.local').lower().strip()
@@ -234,9 +240,9 @@ def init_db():
         for pos, row in enumerate(conn.execute('SELECT id, category FROM stories ORDER BY featured DESC, id').fetchall(), start=1):
             conn.execute('INSERT INTO issue_stories(issue_id,story_id,position,section_name) VALUES(?,?,?,?)',
                          (issue_id, row[0], pos, row[1]))
-    stale_cutoff = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
+    stale_cutoff = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     conn.execute(
-        "UPDATE research_requests SET status='Error', result='Research did not complete because the application restarted. Please submit the request again.', updated_at=? WHERE status='In Progress' AND updated_at<?",
+        "UPDATE research_requests SET status='Error', result='Research exceeded the maximum processing window and was stopped. Please submit a narrower request.', last_error='Maximum runtime exceeded', updated_at=? WHERE status IN ('Queued','In Progress') AND created_at<?",
         (now, stale_cutoff),
     )
     conn.commit()
@@ -532,84 +538,203 @@ def portal_document_new():
         db().execute("INSERT INTO portal_documents(title,description,file_url,category,audience,created_at) VALUES(?,?,?,?,?,?)",(request.form['title'].strip(),request.form.get('description',''),request.form.get('file_url',''),request.form.get('category','Governance'),request.form.get('audience','Members'),datetime.now(UTC).isoformat())); db().commit(); flash('Document added.','success'); return redirect(url_for('portal_home'))
     return render_template('portal_admin.html',mode='document')
 
+RESEARCH_MAX_MINUTES = int(os.environ.get('RESEARCH_MAX_MINUTES', '9'))
+
+
 def research_prompt(question, scope):
-    return ("You are the Society for Presidential Descendants research assistant. Produce a "
-            "source-conscious brief with chronology, key people, primary-source leads, citations, "
-            "and unresolved questions. Clearly separate fact from interpretation.\n\n"
-            f"Question: {question}\nScope: {scope}")
+    return (
+        "You are the Society for Presidential Descendants research assistant. "
+        "Prepare a concise, source-conscious historical brief. Include an executive summary, "
+        "chronology, key people, primary-source leads, citations, competing interpretations, "
+        "and unresolved questions. Clearly separate documented fact from interpretation. "
+        "Use no more than four web searches and prioritize authoritative repositories.\n\n"
+        f"Question: {question}\nScope: {scope}"
+    )
+
+
+def research_age_minutes(item):
+    try:
+        created = datetime.fromisoformat(item['created_at'])
+        return max(0.0, (datetime.now(UTC) - created).total_seconds() / 60.0)
+    except (TypeError, ValueError):
+        return float(RESEARCH_MAX_MINUTES)
+
+
+def update_research(item_id, status, result, poll_errors=None, last_error=None):
+    now = datetime.now(UTC).isoformat()
+    assignments = ['status=?', 'result=?', 'updated_at=?']
+    values = [status, result, now]
+    if poll_errors is not None:
+        assignments.append('poll_errors=?')
+        values.append(poll_errors)
+    if last_error is not None:
+        assignments.append('last_error=?')
+        values.append(last_error)
+    values.append(item_id)
+    db().execute(
+        f"UPDATE research_requests SET {', '.join(assignments)} WHERE id=?",
+        tuple(values),
+    )
+    db().commit()
+    return db().execute(
+        'SELECT * FROM research_requests WHERE id=?', (item_id,)
+    ).fetchone()
 
 
 def refresh_research_request(item):
-    if not item or item['status'] not in ('Queued', 'In Progress') or not item['response_id']:
+    if not item or item['status'] not in ('Queued', 'In Progress'):
         return item
+
+    age = research_age_minutes(item)
+    if age >= RESEARCH_MAX_MINUTES:
+        return update_research(
+            item['id'],
+            'Error',
+            'Research exceeded the nine-minute processing limit and was stopped. '
+            'Submit a narrower question or divide the request into sections.',
+            last_error='Maximum runtime exceeded',
+        )
+
     key = os.environ.get('OPENAI_API_KEY')
     if not key or not OpenAI:
-        return item
+        return update_research(
+            item['id'],
+            'Error',
+            'Research service is not configured.',
+            last_error='OPENAI_API_KEY unavailable',
+        )
+
     try:
         client = OpenAI(api_key=key, timeout=20.0, max_retries=1)
         response = client.responses.retrieve(item['response_id'])
         remote_status = getattr(response, 'status', None)
-        now = datetime.now(UTC).isoformat()
+
         if remote_status == 'completed':
-            status, output = 'Completed', response.output_text
-        elif remote_status in ('failed', 'cancelled', 'incomplete'):
-            detail = getattr(response, 'error', None) or getattr(response, 'incomplete_details', None) or remote_status
-            status, output = 'Error', f'Research service error: {detail}'
-        else:
-            status, output = 'In Progress', 'OpenAI is continuing the research in the background.'
-        db().execute('UPDATE research_requests SET status=?,result=?,updated_at=? WHERE id=?',
-                     (status, output, now, item['id']))
-        db().commit()
-        return db().execute('SELECT * FROM research_requests WHERE id=?', (item['id'],)).fetchone()
+            output = getattr(response, 'output_text', '') or 'Research completed without text output.'
+            return update_research(item['id'], 'Completed', output, poll_errors=0, last_error='')
+
+        if remote_status in ('failed', 'cancelled', 'incomplete'):
+            detail = (
+                getattr(response, 'error', None)
+                or getattr(response, 'incomplete_details', None)
+                or remote_status
+            )
+            return update_research(
+                item['id'],
+                'Error',
+                f'Research service ended with status {remote_status}: {detail}',
+                last_error=str(detail),
+            )
+
+        return update_research(
+            item['id'],
+            'In Progress',
+            f'Research is processing. Elapsed time: {age:.1f} minutes. '
+            f'Maximum permitted time: {RESEARCH_MAX_MINUTES} minutes.',
+        )
+
     except Exception as exc:
-        app.logger.warning('Research status refresh failed: %s', exc)
-        return item
+        errors = int(item['poll_errors'] or 0) + 1
+        message = f'{type(exc).__name__}: {exc}'
+        if errors >= 3 or age >= 2.0:
+            return update_research(
+                item['id'],
+                'Error',
+                'The research status could not be retrieved after repeated attempts. '
+                f'Diagnostic: {message}',
+                poll_errors=errors,
+                last_error=message,
+            )
+        app.logger.warning('Research status refresh attempt %s failed: %s', errors, exc)
+        return update_research(
+            item['id'],
+            'In Progress',
+            f'Temporary status-check failure; retrying automatically ({errors}/3).',
+            poll_errors=errors,
+            last_error=message,
+        )
 
 
 @app.route('/editor/research', methods=['GET', 'POST'])
 @admin_required
 def research_assistant():
     enabled = bool(os.environ.get('OPENAI_API_KEY')) and OpenAI is not None
+
     if request.method == 'POST':
         question = request.form['question'].strip()
-        scope = request.form.get('scope', '')
-        now = datetime.now(UTC).isoformat()
+        scope = request.form.get('scope', '').strip()
+        now_dt = datetime.now(UTC)
+        now = now_dt.isoformat()
+        deadline = (now_dt + timedelta(minutes=RESEARCH_MAX_MINUTES)).isoformat()
         status = 'Needs API Key'
-        initial_result = ('AI research is installed but not activated. Add OPENAI_API_KEY in Render.\n\n'
-                          f'Research packet: {question}\nScope: {scope}\n'
-                          'Suggested repositories: National Archives, Library of Congress, presidential libraries, '
-                          'Founders Online, Chronicling America, and relevant state historical societies.')
+        result_text = ('AI research is not activated. Suggested repositories: National Archives, ''Library of Congress, presidential libraries, Founders Online, Chronicling America, ''and relevant state historical societies.')
         response_id = None
+        last_error = None
+
         if enabled:
             try:
-                client = OpenAI(api_key=os.environ['OPENAI_API_KEY'], timeout=30.0, max_retries=1)
+                client = OpenAI(
+                    api_key=os.environ['OPENAI_API_KEY'],
+                    timeout=30.0,
+                    max_retries=1,
+                )
                 response = client.responses.create(
-                    model=os.environ.get('OPENAI_MODEL', 'gpt-5'),
+                    model=os.environ.get('OPENAI_RESEARCH_MODEL', 'gpt-5-mini'),
                     tools=[{'type': 'web_search'}],
                     input=research_prompt(question, scope),
                     background=True,
                     store=True,
+                    max_tool_calls=4,
+                    max_output_tokens=3500,
                 )
                 response_id = response.id
-                status = 'Queued' if getattr(response, 'status', None) == 'queued' else 'In Progress'
-                initial_result = 'OpenAI accepted the research job and is processing it in the background.'
+                remote_status = getattr(response, 'status', None)
+                status = 'Queued' if remote_status == 'queued' else 'In Progress'
+                result_text = (
+                    'Research accepted. The job has a fixed nine-minute maximum runtime '
+                    'and will always end as Completed or Error.'
+                )
             except Exception as exc:
-                app.logger.exception('Unable to start background research')
+                app.logger.exception('Unable to start research')
                 status = 'Error'
-                initial_result = 'Research service error: ' + str(exc)
+                last_error = f'{type(exc).__name__}: {exc}'
+                result_text = 'Research could not start. Diagnostic: ' + last_error
+
+        sql = (
+            "INSERT INTO research_requests "
+            "(user_id,question,scope,status,result,created_at,updated_at,response_id,"
+            "deadline_at,poll_errors,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+        )
         cur = db().execute(
-            "INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id) VALUES(?,?,?,?,?,?,?,?)",
-            (session['user_id'], question, scope, status, initial_result, now, now, response_id),
+            sql,
+            (
+                session['user_id'], question, scope, status, result_text, now, now,
+                response_id, deadline, 0, last_error,
+            ),
         )
         db().commit()
         request_id = cur.lastrowid
         audit('Created', 'research_request', request_id, status)
         return redirect(url_for('research_assistant', request_id=request_id))
+
     request_id = request.args.get('request_id', type=int)
-    result = db().execute('SELECT * FROM research_requests WHERE id=?', (request_id,)).fetchone() if request_id else None
+    result = (
+        db().execute(
+            'SELECT * FROM research_requests WHERE id=?', (request_id,)
+        ).fetchone()
+        if request_id else None
+    )
     result = refresh_research_request(result)
-    history = db().execute('SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20').fetchall()
-    return render_template('research.html', result=result, history=history, enabled=enabled)
+    history = db().execute(
+        'SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20'
+    ).fetchall()
+    return render_template(
+        'research.html',
+        result=result,
+        history=history,
+        enabled=enabled,
+        max_minutes=RESEARCH_MAX_MINUTES,
+    )
 
 
 @app.route('/editor/audit')

@@ -1,1 +1,38 @@
-{% extends 'base.html' %}{% block title %}AI Research Assistant{% endblock %}{% block content %}{% if result and result.status == 'In Progress' %}<meta http-equiv="refresh" content="5">{% endif %}<section class="admin-head"><div class="wrap"><div><div class="eyebrow">VERSION 4</div><h1>AI Research Assistant</h1><p>{% if enabled %}Live web-grounded research is enabled.{% else %}Research workflow installed; API activation pending.{% endif %}</p></div><a class="button secondary" href="{{url_for('portal_home')}}">Society Portal</a></div></section><section class="wrap section editor-layout"><form method="post" class="panel"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><label>Research question<textarea name="question" rows="6" required></textarea></label><label>Scope, dates, people and constraints<textarea name="scope" rows="5"></textarea></label><button class="button">Start Research</button><p><small>The request runs in the background. This page refreshes automatically while research is in progress.</small></p></form><div class="panel">{% if result %}<h2>{{result.status}}</h2><h3>{{result.question}}</h3><pre class="research-output">{{result.result}}</pre>{% if result.status == 'In Progress' %}<p><strong>Research is still running. Do not resubmit.</strong></p>{% endif %}{% else %}<h2>Editorial research standard</h2><p>Outputs distinguish documented fact, interpretation and unresolved questions, and identify primary-source leads.</p>{% endif %}</div></section><section class="wrap section"><h2>Recent Requests</h2>{% for r in history %}<article class="panel"><b>{{r.question}}</b><br><small>{{r.status}} · {{r.created_at[:16]}}</small></article>{% else %}<p>No research requests yet.</p>{% endfor %}</section>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}AI Research Assistant{% endblock %}
+{% block content %}
+{% if result and result.status in ('Queued','In Progress') %}
+<meta http-equiv="refresh" content="8">
+{% endif %}
+<section class="admin-head"><div class="wrap"><div>
+<div class="eyebrow">VERSION 6</div>
+<h1>AI Research Assistant</h1>
+<p>{% if enabled %}Bounded web-grounded research is enabled.{% else %}API activation pending.{% endif %}</p>
+</div><a class="button secondary" href="{{url_for('portal_home')}}">Society Portal</a></div></section>
+<section class="wrap section editor-layout">
+<form method="post" class="panel">
+<input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+<label>Research question<textarea name="question" rows="6" required></textarea></label>
+<label>Scope, dates, people and constraints<textarea name="scope" rows="5"></textarea></label>
+<button class="button">Start Research</button>
+<p><small>Every job ends as Completed or Error within {{max_minutes}} minutes. Do not resubmit while active.</small></p>
+</form>
+<div class="panel">
+{% if result %}
+<h2>{{result.status}}</h2><h3>{{result.question}}</h3>
+<pre class="research-output">{{result.result}}</pre>
+{% if result.status in ('Queued','In Progress') %}
+<p><strong>Automatic status checks are active.</strong></p>
+{% endif %}
+{% if result.last_error %}<p><small>Diagnostic: {{result.last_error}}</small></p>{% endif %}
+{% else %}
+<h2>Editorial research standard</h2>
+<p>Outputs separate documented fact, interpretation, and unresolved questions and identify primary-source leads.</p>
+{% endif %}
+</div></section>
+<section class="wrap section"><h2>Recent Requests</h2>
+{% for r in history %}
+<article class="panel"><b>{{r.question}}</b><br><small>{{r.status}} · {{r.created_at[:16]}}</small></article>
+{% else %}<p>No research requests yet.</p>{% endfor %}
+</section>
+{% endblock %}

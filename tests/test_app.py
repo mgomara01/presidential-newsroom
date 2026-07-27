@@ -34,7 +34,7 @@ class NewsroomTestCase(unittest.TestCase):
         response = self.client.get('/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'ok')
-        self.assertEqual(response.get_json()['version'], '5.0.0')
+        self.assertEqual(response.get_json()['version'], '6.0.0')
 
     def test_login_rejects_external_redirect(self):
         response = self.client.post('/login?next=//evil.example', data={
