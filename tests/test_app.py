@@ -34,7 +34,7 @@ class NewsroomTestCase(unittest.TestCase):
         response = self.client.get('/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'ok')
-        self.assertEqual(response.get_json()['version'], '4.1.1')
+        self.assertEqual(response.get_json()['version'], '5.0.0')
 
     def test_login_rejects_external_redirect(self):
         response = self.client.post('/login?next=//evil.example', data={
@@ -173,17 +173,29 @@ class NewsroomTestCase(unittest.TestCase):
     def test_research_runs_in_background_without_blocking_request(self):
         import time
 
-        class FakeResponse:
-            output_text = "Completed research packet"
+        class FakeCreatedResponse:
+            id = 'resp_test_123'
+            status = 'queued'
+
+        class FakeCompletedResponse:
+            id = 'resp_test_123'
+            status = 'completed'
+            output_text = 'Completed research packet'
 
         class FakeResponses:
-            def create(self, **_kwargs):
-                time.sleep(0.15)
-                return FakeResponse()
+            def create(self, **kwargs):
+                self.create_kwargs = kwargs
+                return FakeCreatedResponse()
+
+            def retrieve(self, response_id):
+                self.response_id = response_id
+                return FakeCompletedResponse()
 
         class FakeOpenAI:
+            shared_responses = FakeResponses()
+
             def __init__(self, **_kwargs):
-                self.responses = FakeResponses()
+                self.responses = self.shared_responses
 
         self.login()
         original_openai = self.module.OpenAI
@@ -199,20 +211,17 @@ class NewsroomTestCase(unittest.TestCase):
             elapsed = time.monotonic() - started
             self.assertEqual(response.status_code, 302)
             self.assertLess(elapsed, 0.5)
+            self.assertTrue(FakeOpenAI.shared_responses.create_kwargs['background'])
             request_id = int(response.location.rsplit('=', 1)[1])
-            deadline = time.monotonic() + 3
-            row = None
-            while time.monotonic() < deadline:
-                with self.module.app.app_context():
-                    row = self.module.db().execute(
-                        'SELECT * FROM research_requests WHERE id=?', (request_id,)
-                    ).fetchone()
-                if row and row['status'] == 'Completed':
-                    break
-                time.sleep(0.05)
-            self.assertIsNotNone(row)
+            page = self.client.get(response.location)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(b'Completed research packet', page.data)
+            with self.module.app.app_context():
+                row = self.module.db().execute(
+                    'SELECT * FROM research_requests WHERE id=?', (request_id,)
+                ).fetchone()
             self.assertEqual(row['status'], 'Completed')
-            self.assertEqual(row['result'], 'Completed research packet')
+            self.assertEqual(row['response_id'], 'resp_test_123')
         finally:
             self.module.OpenAI = original_openai
             os.environ.pop('OPENAI_API_KEY', None)
