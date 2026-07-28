@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('DATABASE_PATH', BASE_DIR / 'instance' / 'newsroom.db'))
 UPLOAD_DIR = Path(os.environ.get('UPLOAD_DIR', DB_PATH.parent / 'uploads'))
 ALLOWED_UPLOADS = {'png','jpg','jpeg','gif','webp','pdf','doc','docx'}
-APP_VERSION = '6.2.1'
+APP_VERSION = '6.3.0'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -186,6 +186,9 @@ def init_db():
         details TEXT,
         created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS submission_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, submission_id INTEGER NOT NULL, filename TEXT NOT NULL, original_name TEXT NOT NULL, mime_type TEXT, created_at TEXT NOT NULL, FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         story_id INTEGER NOT NULL,
@@ -198,6 +201,9 @@ def init_db():
         FOREIGN KEY(story_id) REFERENCES stories(id) ON DELETE CASCADE
     );
     ''')
+    member_columns = {row[1] for row in conn.execute('PRAGMA table_info(members)').fetchall()}
+    if 'bio_url' not in member_columns:
+        conn.execute('ALTER TABLE members ADD COLUMN bio_url TEXT')
     columns = {row[1] for row in conn.execute('PRAGMA table_info(research_requests)').fetchall()}
     if 'response_id' not in columns:
         conn.execute('ALTER TABLE research_requests ADD COLUMN response_id TEXT')
@@ -380,8 +386,17 @@ def submit():
         cur = db().execute('''INSERT INTO submissions(tracking_code,contributor_name,contributor_email,relationship,category,presidential_connection,proposed_headline,summary,full_narrative,event_date,location,sources,photo_caption,photo_credit,rights_certified,privacy_level,embargo_date,status,created_at,updated_at)
                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                            (tracking, request.form['contributor_name'].strip(), request.form['contributor_email'].strip(), request.form['relationship'], request.form['category'], request.form.get('presidential_connection','').strip(), request.form.get('proposed_headline','').strip(), request.form['summary'].strip(), request.form.get('full_narrative','').strip(), request.form.get('event_date',''), request.form.get('location','').strip(), request.form.get('sources','').strip(), request.form.get('photo_caption','').strip(), request.form.get('photo_credit','').strip(), 1, request.form.get('privacy_level','Public'), request.form.get('embargo_date',''), 'Received', now.isoformat(), now.isoformat()))
+        submission_id = cur.lastrowid
+        for uploaded in request.files.getlist('attachments'):
+            if uploaded and uploaded.filename:
+                if not allowed_upload(uploaded.filename):
+                    flash(f'Unsupported file type: {uploaded.filename}', 'error'); continue
+                original=secure_filename(uploaded.filename); ext=original.rsplit('.',1)[1].lower()
+                stored=f'sub-{submission_id}-{secrets.token_hex(8)}.{ext}'
+                uploaded.save(UPLOAD_DIR / stored)
+                db().execute('INSERT INTO submission_attachments(submission_id,filename,original_name,mime_type,created_at) VALUES(?,?,?,?,?)',(submission_id,stored,original,uploaded.mimetype,now.isoformat()))
         db().commit()
-        audit('Created', 'submission', cur.lastrowid, tracking)
+        audit('Created', 'submission', submission_id, tracking)
         return render_template('thanks.html', tracking=tracking)
     return render_template('submit.html', form={})
 
@@ -435,7 +450,8 @@ def edit_submission(item_id):
                                (item_id, slug, title, item['summary'], item['full_narrative'] or item['summary'], item['category'], item['contributor_name'], item['presidential_connection'], '', item['sources'], 'Pending', 'Certified by contributor' if item['rights_certified'] else 'Pending', 'Draft', now, now))
             db().commit(); audit('Created', 'story', cur.lastrowid, f'From submission {item_id}'); flash('Draft story created.', 'success')
         return redirect(url_for('edit_submission', item_id=item_id))
-    return render_template('edit_submission.html', item=item)
+    files=db().execute('SELECT * FROM submission_attachments WHERE submission_id=? ORDER BY id',(item_id,)).fetchall()
+    return render_template('edit_submission.html', item=item, files=files)
 
 
 @app.route('/editor/story/new', methods=['GET', 'POST'])
@@ -519,7 +535,7 @@ def edit_issue(item_id=None):
 def portal_home():
     events=db().execute("SELECT * FROM society_events ORDER BY starts_at LIMIT 8").fetchall()
     documents=db().execute("SELECT * FROM portal_documents ORDER BY created_at DESC LIMIT 8").fetchall()
-    members=db().execute("SELECT * FROM members WHERE visibility!='Private' ORDER BY full_name LIMIT 12").fetchall()
+    members=db().execute("SELECT * FROM members WHERE visibility!='Private' ORDER BY CASE WHEN committee LIKE 'Officer%' THEN 0 ELSE 1 END, full_name").fetchall()
     return render_template('portal.html',events=events,documents=documents,members=members)
 
 @app.route('/portal/directory')

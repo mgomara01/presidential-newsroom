@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import io
 import os
 import tempfile
@@ -34,7 +34,7 @@ class NewsroomTestCase(unittest.TestCase):
         response = self.client.get('/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'ok')
-        self.assertEqual(response.get_json()['version'], '6.2.1')
+        self.assertEqual(response.get_json()['version'], '6.3.0')
 
     def test_login_rejects_external_redirect(self):
         response = self.client.post('/login?next=//evil.example', data={
@@ -249,4 +249,6 @@ class NewsroomTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

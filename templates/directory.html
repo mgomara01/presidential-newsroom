@@ -27,7 +27,7 @@
       <h3>{{m.full_name}}</h3>
       {% if m.presidential_connection %}<p class="connection">{{m.presidential_connection}}</p>{% endif %}
       {% if m.biography %}<p class="bio">{{m.biography}}</p>{% endif %}
-      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}
+      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}{% if m.bio_url %}<a class="bio-link" href="{{m.bio_url}}" target="_blank" rel="noopener">Read official biography ↗</a>{% endif %}
     </article>
   {% else %}<p>No officer profiles match this search.</p>{% endfor %}
   </div>
@@ -45,7 +45,7 @@
       <h3>{{m.full_name}}</h3>
       {% if m.presidential_connection %}<p class="connection">{{m.presidential_connection}}</p>{% else %}<p class="connection muted">Presidential connection not listed publicly</p>{% endif %}
       {% if m.biography %}<p class="bio">{{m.biography}}</p>{% endif %}
-      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}
+      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}{% if m.bio_url %}<a class="bio-link" href="{{m.bio_url}}" target="_blank" rel="noopener">Read official biography ↗</a>{% endif %}
     </article>
   {% else %}<p>No board profiles match this search.</p>{% endfor %}
   </div>

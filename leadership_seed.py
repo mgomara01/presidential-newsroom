@@ -1,5 +1,13 @@
 ﻿from datetime import UTC, datetime
 
+
+OFFICERS_URL='https://societyofpresidentialdescendants.org/the-society-of-presidential-descendants-officers/'
+BOARD_URL='https://societyofpresidentialdescendants.org/board-of-trustees/'
+BIO_URLS={
+'Tweed Roosevelt':OFFICERS_URL,'Massee McKinley':OFFICERS_URL,'Lynda Johnson Robb':OFFICERS_URL,'Clifton Truman Daniel':OFFICERS_URL,'Austin Hayes':OFFICERS_URL,
+'Hobart P. "Hobey" Bauhan':BOARD_URL+'hobart-bauhan/','Sarah Garfield Berry':BOARD_URL+'sarah-garfield-berry/','James Earl Carter IV':BOARD_URL+'james-earl-carter-iv/','George Cleveland':BOARD_URL+'george-cleveland/','Arnold Cogswell, Jr.':BOARD_URL+'arnold-cogswell-jr/','Ulysses Grant Dietz':BOARD_URL+'ulysses-grant-dietz/','Richard Gatchell, Jr.':BOARD_URL+'richard-gatchell-jr/','James A. Garfield III':BOARD_URL+'james-garfield-iii/','Jennifer Coolidge Sayles Harville':BOARD_URL+'jennifer-coolidge/','Leslie Hoover-Lauble':BOARD_URL+'leslie-hoover-lauble/','Michael G. O\'Mara':BOARD_URL+'michael-omara/','Ashley Reagan':BOARD_URL+'ashley-reagan/','Patricia M. Taft':BOARD_URL+'patricia-taft/','Birchard M. Taylor':BOARD_URL+'birchard-taylor/','John Hamilton Works, Jr.':BOARD_URL+'john-works/'
+}
+
 PUBLIC_LEADERSHIP = [
     ('Tweed Roosevelt','Great-grandson of Theodore Roosevelt','President of the Society and chairman of the Theodore Roosevelt Institute.','', '', 'Officer - President'),
     ('Massee McKinley','','Vice President and Chief of Staff of the Society.','', '', 'Officer - Vice President and Chief of Staff'),
@@ -34,10 +42,11 @@ PUBLIC_LEADERSHIP = [
 def seed_public_leadership(conn):
     now = datetime.now(UTC).isoformat()
     for full_name, connection, biography, city, state, role in PUBLIC_LEADERSHIP:
+        bio_url = BIO_URLS.get(full_name, BOARD_URL)
         row = conn.execute('SELECT id FROM members WHERE full_name=?', (full_name,)).fetchone()
         if row:
-            conn.execute('UPDATE members SET presidential_connection=?, biography=?, city=?, state=?, visibility=?, committee=?, updated_at=? WHERE id=?',
-                         (connection, biography, city, state, 'Public', role, now, row[0]))
+            conn.execute('UPDATE members SET presidential_connection=?, biography=?, city=?, state=?, visibility=?, committee=?, bio_url=?, updated_at=? WHERE id=?',
+                         (connection, biography, city, state, 'Public', role, bio_url, now, row[0]))
         else:
-            conn.execute('INSERT INTO members(user_id,full_name,presidential_connection,biography,city,state,visibility,committee,phone,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?,?,?,?,?)',
-                         (full_name, connection, biography, city, state, 'Public', role, '', now, now))
+            conn.execute('INSERT INTO members(user_id,full_name,presidential_connection,biography,city,state,visibility,committee,phone,created_at,updated_at,bio_url) VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?)',
+                         (full_name, connection, biography, city, state, 'Public', role, '', now, now, bio_url))
