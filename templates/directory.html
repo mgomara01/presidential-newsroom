@@ -1,1 +1,53 @@
-﻿{% extends 'base.html' %}{% block title %}Member Directory{% endblock %}{% block content %}<section class="page-head"><div class="wrap"><div class="eyebrow">SOCIETY PORTAL</div><h1>Member Directory</h1><form class="search"><input name="q" value="{{q}}" placeholder="Search name, president, city, state or committee"><button>Search</button></form></div></section><section class="wrap section"><div class="card-grid">{% for m in members %}<article class="story-card"><h3>{{m.full_name}}</h3><p>{{m.presidential_connection or 'Society member'}}</p><p>{{m.biography}}</p><small>{{m.city}}{% if m.state %}, {{m.state}}{% endif %}{% if m.committee %} · {{m.committee}}{% endif %}</small></article>{% else %}<p>No members match.</p>{% endfor %}</div></section>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Society Leadership Directory{% endblock %}
+{% block content %}
+<section class="directory-hero">
+  <div class="wrap directory-hero-inner">
+    <div>
+      <div class="eyebrow">SOCIETY PORTAL</div>
+      <h1>Society Leadership Directory</h1>
+      <p>Public profiles of the Society's officers, trustees and advisory board members.</p>
+    </div>
+    <form class="directory-search">
+      <input name="q" value="{{q}}" placeholder="Search by name, president, location or role">
+      <button>Search</button>
+    </form>
+  </div>
+</section>
+
+<section class="wrap directory-section">
+  <div class="directory-section-head">
+    <div><div class="eyebrow">EXECUTIVE LEADERSHIP</div><h2>Officers</h2></div>
+    <span>{{ officers|length }} profiles</span>
+  </div>
+  <div class="leadership-grid officer-grid">
+  {% for m in officers %}
+    <article class="leadership-card officer-card">
+      <div class="role-label">{{ m.committee.replace('Officer - ', '') }}</div>
+      <h3>{{m.full_name}}</h3>
+      {% if m.presidential_connection %}<p class="connection">{{m.presidential_connection}}</p>{% endif %}
+      {% if m.biography %}<p class="bio">{{m.biography}}</p>{% endif %}
+      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}
+    </article>
+  {% else %}<p>No officer profiles match this search.</p>{% endfor %}
+  </div>
+</section>
+
+<section class="wrap directory-section board-section">
+  <div class="directory-section-head">
+    <div><div class="eyebrow">GOVERNANCE</div><h2>Board of Trustees</h2></div>
+    <span>{{ board|length }} profiles</span>
+  </div>
+  <div class="leadership-grid board-grid">
+  {% for m in board %}
+    <article class="leadership-card">
+      <div class="role-label {% if m.committee == 'Advisory Board Member' %}advisory{% endif %}">{{m.committee}}</div>
+      <h3>{{m.full_name}}</h3>
+      {% if m.presidential_connection %}<p class="connection">{{m.presidential_connection}}</p>{% else %}<p class="connection muted">Presidential connection not listed publicly</p>{% endif %}
+      {% if m.biography %}<p class="bio">{{m.biography}}</p>{% endif %}
+      {% if m.city or m.state %}<div class="location">{{m.city}}{% if m.city and m.state %}, {% endif %}{{m.state}}</div>{% endif %}
+    </article>
+  {% else %}<p>No board profiles match this search.</p>{% endfor %}
+  </div>
+</section>
+{% endblock %}

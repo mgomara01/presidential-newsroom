@@ -525,10 +525,19 @@ def portal_home():
 @app.route('/portal/directory')
 @login_required
 def portal_directory():
-    q=request.args.get('q','').strip(); sql="SELECT * FROM members WHERE visibility!='Private'"; params=[]
+    q = request.args.get('q', '').strip()
+    sql = "SELECT * FROM members WHERE visibility!='Private'"
+    params = []
     if q:
-        sql += " AND (full_name LIKE ? OR presidential_connection LIKE ? OR city LIKE ? OR state LIKE ? OR committee LIKE ?)"; params=[f'%{q}%']*5
-    return render_template('directory.html',members=db().execute(sql+' ORDER BY full_name',params).fetchall(),q=q)
+        sql += " AND (full_name LIKE ? OR presidential_connection LIKE ? OR city LIKE ? OR state LIKE ? OR committee LIKE ?)"
+        params = [f'%{q}%'] * 5
+    rows = db().execute(sql + ' ORDER BY full_name', params).fetchall()
+    officers = [row for row in rows if (row['committee'] or '').startswith('Officer')]
+    board = [row for row in rows if not (row['committee'] or '').startswith('Officer')]
+    officer_order = {'Officer - President': 1, 'Officer - Vice President and Chief of Staff': 2, 'Officer - Vice President': 3, 'Officer - Treasurer': 4}
+    officers.sort(key=lambda row: (officer_order.get(row['committee'], 99), row['full_name']))
+    board.sort(key=lambda row: (0 if row['committee'] == 'Board of Trustees' else 1, row['full_name']))
+    return render_template('directory.html', officers=officers, board=board, q=q)
 
 @app.route('/portal/pledge',methods=['POST'])
 @login_required
