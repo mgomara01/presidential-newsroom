@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from leadership_seed import seed_public_leadership
+from launch_content import seed_launch_content
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, send_from_directory, session, url_for
 from flask_wtf.csrf import CSRFProtect
@@ -276,6 +277,7 @@ def init_db():
         (now, stale_cutoff),
     )
     seed_public_leadership(conn)
+    seed_launch_content(conn)
     conn.commit()
     conn.close()
 
