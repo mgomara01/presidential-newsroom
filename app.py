@@ -541,7 +541,6 @@ def portal_home():
     return render_template('portal.html',events=events,documents=documents,members=members)
 
 @app.route('/portal/directory')
-@login_required
 def portal_directory():
     q = request.args.get('q', '').strip()
     sql = "SELECT * FROM members WHERE visibility!='Private'"
