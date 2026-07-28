@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import io
 import os
 import tempfile
@@ -34,7 +34,7 @@ class NewsroomTestCase(unittest.TestCase):
         response = self.client.get('/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['status'], 'ok')
-        self.assertEqual(response.get_json()['version'], '6.0.0')
+        self.assertEqual(response.get_json()['version'], '6.2.0')
 
     def test_login_rejects_external_redirect(self):
         response = self.client.post('/login?next=//evil.example', data={
@@ -160,146 +160,82 @@ class NewsroomTestCase(unittest.TestCase):
         self.assertEqual(r.status_code,302)
         self.assertIn(b'Test Descendant',self.client.get('/portal/directory').data)
 
-    def test_research_assistant_graceful_without_api_key(self):
+    def test_search_draft_graceful_without_api_key(self):
         self.login()
-        os.environ.pop('OPENAI_API_KEY',None)
-        r=self.client.post('/editor/research',data={'question':'What primary sources document the event?','scope':'Early republic'},follow_redirects=True)
-        self.assertEqual(r.status_code,200)
-        self.assertIn(b'Needs API Key',r.data)
-        self.assertIn(b'National Archives',r.data)
+        os.environ.pop('OPENAI_API_KEY', None)
+        r = self.client.post(
+            '/editor/research',
+            data={'question':'James Madison and the Constitution','scope':'Short news post'},
+            follow_redirects=True,
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b'Needs API Key', r.data)
+        self.assertIn(b'not activated', r.data)
 
-
-
-    def test_research_runs_in_background_without_blocking_request(self):
-        import time
-
-        class FakeCreatedResponse:
-            id = 'resp_test_123'
-            status = 'queued'
-
-        class FakeCompletedResponse:
-            id = 'resp_test_123'
-            status = 'completed'
-            output_text = 'Completed research packet'
+    def test_search_draft_returns_completed_article(self):
+        class FakeResponse:
+            output_text = '# Madison and the Constitution\n\nA concise historical news post.\n\n## Sources consulted\n- Founders Online'
+            incomplete_details = None
+            error = None
 
         class FakeResponses:
             def create(self, **kwargs):
-                self.create_kwargs = kwargs
-                return FakeCreatedResponse()
-
-            def retrieve(self, response_id):
-                self.response_id = response_id
-                return FakeCompletedResponse()
+                self.kwargs = kwargs
+                return FakeResponse()
 
         class FakeOpenAI:
-            shared_responses = FakeResponses()
-
-            def __init__(self, **_kwargs):
-                self.responses = self.shared_responses
+            shared = FakeResponses()
+            def __init__(self, **kwargs):
+                self.responses = self.shared
 
         self.login()
-        original_openai = self.module.OpenAI
-        os.environ['OPENAI_API_KEY'] = 'test-key'
+        original = self.module.OpenAI
         self.module.OpenAI = FakeOpenAI
+        os.environ['OPENAI_API_KEY'] = 'test-key'
         try:
-            started = time.monotonic()
             response = self.client.post(
                 '/editor/research',
-                data={'question': 'Background test', 'scope': 'Test scope'},
-                follow_redirects=False,
+                data={
+                    'question':'James Madison and the Constitution',
+                    'scope':'Focus on 1787-1788',
+                    'article_type':'news post',
+                    'target_words':'600',
+                },
+                follow_redirects=True,
             )
-            elapsed = time.monotonic() - started
-            self.assertEqual(response.status_code, 302)
-            self.assertLess(elapsed, 0.5)
-            self.assertTrue(FakeOpenAI.shared_responses.create_kwargs['background'])
-            request_id = int(response.location.rsplit('=', 1)[1])
-            page = None
-            for _ in range(6):
-                page = self.client.get(response.location)
-                self.assertEqual(page.status_code, 200)
-            self.assertIn(b'Completed research packet', page.data)
-            with self.module.app.app_context():
-                row = self.module.db().execute(
-                    'SELECT * FROM research_requests WHERE id=?', (request_id,)
-                ).fetchone()
-                knowledge = self.module.db().execute(
-                    'SELECT * FROM knowledge_records WHERE research_request_id=?', (request_id,)
-                ).fetchone()
-            self.assertEqual(row['status'], 'Completed')
-            self.assertEqual(row['pipeline_stage'], 4)
-            self.assertIsNone(row['response_id'])
-            self.assertIsNotNone(knowledge)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'Completed', response.data)
+            self.assertIn(b'Madison and the Constitution', response.data)
+            self.assertEqual(FakeOpenAI.shared.kwargs['max_tool_calls'], 3)
+            self.assertEqual(FakeOpenAI.shared.kwargs['max_output_tokens'], 1800)
+            self.assertNotIn('background', FakeOpenAI.shared.kwargs)
         finally:
-            self.module.OpenAI = original_openai
+            self.module.OpenAI = original
             os.environ.pop('OPENAI_API_KEY', None)
 
-    def test_research_incomplete_partial_advances_stage(self):
-        class Partial:
-            status='incomplete'; output_text='Usable planning output'; incomplete_details='max_output_tokens'
-        class Created:
-            id='resp_partial'; status='queued'
-        class Responses:
-            def create(self,**kwargs): return Created()
-            def retrieve(self,response_id): return Partial()
+    def test_search_draft_records_api_error(self):
+        class FakeResponses:
+            def create(self, **kwargs):
+                raise TimeoutError('simulated timeout')
         class FakeOpenAI:
-            def __init__(self,**kwargs): self.responses=Responses()
-        self.login(); original=self.module.OpenAI; os.environ['OPENAI_API_KEY']='test-key'; self.module.OpenAI=FakeOpenAI
+            def __init__(self, **kwargs):
+                self.responses = FakeResponses()
+        self.login()
+        original = self.module.OpenAI
+        self.module.OpenAI = FakeOpenAI
+        os.environ['OPENAI_API_KEY'] = 'test-key'
         try:
-            response=self.client.post('/editor/research',data={'question':'Partial test','scope':'bounded'},follow_redirects=False)
-            self.client.get(response.location)
-            request_id=int(response.location.rsplit('=',1)[1])
-            with self.module.app.app_context():
-                row=self.module.db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone()
-            self.assertEqual(row['pipeline_stage'],1)
-            self.assertIn('Usable planning output',row['stage_outputs'])
+            response = self.client.post(
+                '/editor/research',
+                data={'question':'Timeout topic','scope':'short'},
+                follow_redirects=True,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'Error', response.data)
+            self.assertIn(b'simulated timeout', response.data)
         finally:
-            self.module.OpenAI=original; os.environ.pop('OPENAI_API_KEY',None)
-
-    def test_research_stage_timeout_becomes_error(self):
-        self.login(); os.environ['OPENAI_API_KEY']='test-key'
-        old=(self.module.datetime.now(self.module.UTC)-self.module.timedelta(minutes=20)).isoformat()
-        with self.module.app.app_context():
-            cur=self.module.db().execute("INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id,pipeline_stage,stage_outputs,stage_started_at,progress_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(1,'Timeout test','scope','In Progress','running',old,old,'resp_old',0,'{}',old,'Planning'))
-            self.module.db().commit(); request_id=cur.lastrowid
-        page=self.client.get(f'/editor/research?request_id={request_id}')
-        self.assertIn(b'Timed Out',page.data)
-        with self.module.app.app_context():
-            row=self.module.db().execute('SELECT status FROM research_requests WHERE id=?',(request_id,)).fetchone()
-        self.assertEqual(row['status'],'Error'); os.environ.pop('OPENAI_API_KEY',None)
-
-    def test_research_incomplete_partial_advances_stage(self):
-        class Partial:
-            status='incomplete'; output_text='Usable planning output'; incomplete_details='max_output_tokens'
-        class Created:
-            id='resp_partial'; status='queued'
-        class Responses:
-            def create(self,**kwargs): return Created()
-            def retrieve(self,response_id): return Partial()
-        class FakeOpenAI:
-            def __init__(self,**kwargs): self.responses=Responses()
-        self.login(); original=self.module.OpenAI; os.environ['OPENAI_API_KEY']='test-key'; self.module.OpenAI=FakeOpenAI
-        try:
-            response=self.client.post('/editor/research',data={'question':'Partial test','scope':'bounded'},follow_redirects=False)
-            self.client.get(response.location)
-            request_id=int(response.location.rsplit('=',1)[1])
-            with self.module.app.app_context():
-                row=self.module.db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone()
-            self.assertEqual(row['pipeline_stage'],1)
-            self.assertIn('Usable planning output',row['stage_outputs'])
-        finally:
-            self.module.OpenAI=original; os.environ.pop('OPENAI_API_KEY',None)
-
-    def test_research_stage_timeout_becomes_error(self):
-        self.login(); os.environ['OPENAI_API_KEY']='test-key'
-        old=(self.module.datetime.now(self.module.UTC)-self.module.timedelta(minutes=20)).isoformat()
-        with self.module.app.app_context():
-            cur=self.module.db().execute("INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id,pipeline_stage,stage_outputs,stage_started_at,progress_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(1,'Timeout test','scope','In Progress','running',old,old,'resp_old',0,'{}',old,'Planning'))
-            self.module.db().commit(); request_id=cur.lastrowid
-        page=self.client.get(f'/editor/research?request_id={request_id}')
-        self.assertIn(b'Timed Out',page.data)
-        with self.module.app.app_context():
-            row=self.module.db().execute('SELECT status FROM research_requests WHERE id=?',(request_id,)).fetchone()
-        self.assertEqual(row['status'],'Error'); os.environ.pop('OPENAI_API_KEY',None)
+            self.module.OpenAI = original
+            os.environ.pop('OPENAI_API_KEY', None)
 
     def test_member_can_use_portal_but_not_editor(self):
         self.login()
@@ -313,3 +249,5 @@ class NewsroomTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
