@@ -1,38 +1,9 @@
 {% extends 'base.html' %}
-{% block title %}AI Research Assistant{% endblock %}
+{% block title %}AI Research Pipeline{% endblock %}
 {% block content %}
-{% if result and result.status in ('Queued','In Progress') %}
-<meta http-equiv="refresh" content="8">
-{% endif %}
-<section class="admin-head"><div class="wrap"><div>
-<div class="eyebrow">VERSION 6</div>
-<h1>AI Research Assistant</h1>
-<p>{% if enabled %}Bounded web-grounded research is enabled.{% else %}API activation pending.{% endif %}</p>
-</div><a class="button secondary" href="{{url_for('portal_home')}}">Society Portal</a></div></section>
-<section class="wrap section editor-layout">
-<form method="post" class="panel">
-<input type="hidden" name="csrf_token" value="{{csrf_token()}}">
-<label>Research question<textarea name="question" rows="6" required></textarea></label>
-<label>Scope, dates, people and constraints<textarea name="scope" rows="5"></textarea></label>
-<button class="button">Start Research</button>
-<p><small>Every job ends as Completed or Error within {{max_minutes}} minutes. Do not resubmit while active.</small></p>
-</form>
-<div class="panel">
-{% if result %}
-<h2>{{result.status}}</h2><h3>{{result.question}}</h3>
-<pre class="research-output">{{result.result}}</pre>
-{% if result.status in ('Queued','In Progress') %}
-<p><strong>Automatic status checks are active.</strong></p>
-{% endif %}
-{% if result.last_error %}<p><small>Diagnostic: {{result.last_error}}</small></p>{% endif %}
-{% else %}
-<h2>Editorial research standard</h2>
-<p>Outputs separate documented fact, interpretation, and unresolved questions and identify primary-source leads.</p>
-{% endif %}
-</div></section>
-<section class="wrap section"><h2>Recent Requests</h2>
-{% for r in history %}
-<article class="panel"><b>{{r.question}}</b><br><small>{{r.status}} · {{r.created_at[:16]}}</small></article>
-{% else %}<p>No research requests yet.</p>{% endfor %}
-</section>
-{% endblock %}
+{% if result and result.status in ('Queued','In Progress') %}<meta http-equiv="refresh" content="8">{% endif %}
+<section class="admin-head"><div class="wrap"><div><div class="eyebrow">VERSION 6 · AGENTIC EDITORIAL PIPELINE</div><h1>AI Historical Research Desk</h1><p>{% if enabled %}Five-stage, source-conscious research and editorial production is enabled.{% else %}API activation pending.{% endif %}</p></div><div><a class="button secondary" href="{{url_for('knowledge_library')}}">Knowledge Library</a> <a class="button secondary" href="{{url_for('portal_home')}}">Society Portal</a></div></div></section>
+<section class="wrap section editor-layout"><form method="post" class="panel"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><label>Research question<textarea name="question" rows="6" required></textarea></label><label>Scope, dates, people, desired length and constraints<textarea name="scope" rows="5"></textarea></label><button class="button">Start Five-Stage Research</button><p><small>Pipeline: Planning → Evidence → Chronology → Drafting → Managing Editor Review. Each stage has an independent {{stage_minutes}}-minute limit.</small></p></form>
+<div class="panel">{% if result %}<div class="eyebrow">{{result.progress_label or result.status}}</div><h2>{{result.status}}</h2><h3>{{result.question}}</h3>{% if result.status in ('Queued','In Progress') %}<div class="progress-track"><div class="progress-fill" style="width:{{ ((result.pipeline_stage+1) / stages|length * 100)|round }}%"></div></div><p><strong>Stage {{result.pipeline_stage+1}} of {{stages|length}}:</strong> {{result.progress_label}}</p>{% endif %}<pre class="research-output">{{result.result}}</pre>{% if result.last_error %}<p><small>Diagnostic: {{result.last_error}}</small></p>{% endif %}{% else %}<h2>Editorial standard</h2><p>The pipeline separates planning, evidence collection, historical analysis, drafting, and managing-editor review. Final packets are preserved in the institutional knowledge library.</p>{% endif %}</div></section>
+{% if stage_cards %}<section class="wrap section"><h2>Completed Pipeline Stages</h2>{% for card in stage_cards %}<details class="panel"><summary><strong>{{card.label}}</strong></summary><pre class="research-output">{{card.content}}</pre></details>{% endfor %}</section>{% endif %}
+<section class="wrap section"><h2>Recent Requests</h2>{% for r in history %}<article class="panel"><b><a href="{{url_for('research_assistant',request_id=r.id)}}">{{r.question}}</a></b><br><small>{{r.status}} · {{r.progress_label or ''}} · {{r.created_at[:16]}}</small></article>{% else %}<p>No research requests yet.</p>{% endfor %}</section>{% endblock %}

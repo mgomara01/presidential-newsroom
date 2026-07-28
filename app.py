@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import sqlite3
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -205,6 +206,28 @@ def init_db():
         conn.execute('ALTER TABLE research_requests ADD COLUMN poll_errors INTEGER NOT NULL DEFAULT 0')
     if 'last_error' not in columns:
         conn.execute('ALTER TABLE research_requests ADD COLUMN last_error TEXT')
+    if 'pipeline_stage' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN pipeline_stage INTEGER NOT NULL DEFAULT 0')
+    if 'stage_outputs' not in columns:
+        conn.execute("ALTER TABLE research_requests ADD COLUMN stage_outputs TEXT NOT NULL DEFAULT '{}'")
+    if 'stage_started_at' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN stage_started_at TEXT')
+    if 'stage_deadline_at' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN stage_deadline_at TEXT')
+    if 'progress_label' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN progress_label TEXT')
+    if 'knowledge_saved' not in columns:
+        conn.execute('ALTER TABLE research_requests ADD COLUMN knowledge_saved INTEGER NOT NULL DEFAULT 0')
+    conn.execute('''CREATE TABLE IF NOT EXISTS knowledge_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        research_request_id INTEGER NOT NULL,
+        subject TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        source_packet TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(research_request_id) REFERENCES research_requests(id) ON DELETE CASCADE
+    )''')
     now = datetime.now(UTC).isoformat()
     if not conn.execute('SELECT 1 FROM users LIMIT 1').fetchone():
         admin_email = os.environ.get('ADMIN_EMAIL', 'editor@society.local').lower().strip()
@@ -285,7 +308,7 @@ def inject_globals():
 def health():
     try:
         db().execute('SELECT 1').fetchone()
-        return {'status': 'ok', 'version': APP_VERSION}, 200
+        return {'status': 'ok', 'version': APP_VERSION, 'research_pipeline': 'five-stage'}, 200
     except sqlite3.Error:
         app.logger.exception('Database health check failed')
         return {'status': 'error'}, 503
@@ -538,203 +561,204 @@ def portal_document_new():
         db().execute("INSERT INTO portal_documents(title,description,file_url,category,audience,created_at) VALUES(?,?,?,?,?,?)",(request.form['title'].strip(),request.form.get('description',''),request.form.get('file_url',''),request.form.get('category','Governance'),request.form.get('audience','Members'),datetime.now(UTC).isoformat())); db().commit(); flash('Document added.','success'); return redirect(url_for('portal_home'))
     return render_template('portal_admin.html',mode='document')
 
-RESEARCH_MAX_MINUTES = int(os.environ.get('RESEARCH_MAX_MINUTES', '9'))
+RESEARCH_STAGE_MINUTES = int(os.environ.get('RESEARCH_STAGE_MINUTES', '8'))
+RESEARCH_MODEL = os.environ.get('OPENAI_RESEARCH_MODEL', 'gpt-5-mini')
+RESEARCH_STAGES = [
+    {'slug':'plan','label':'Planning','max_tokens':1400,'web':False},
+    {'slug':'evidence','label':'Evidence Collection','max_tokens':3000,'web':True},
+    {'slug':'chronology','label':'Chronology & Fact Matrix','max_tokens':2400,'web':False},
+    {'slug':'draft','label':'Editorial Drafting','max_tokens':2800,'web':False},
+    {'slug':'review','label':'Managing Editor Review','max_tokens':3200,'web':False},
+]
 
 
-def research_prompt(question, scope):
-    return (
-        "You are the Society for Presidential Descendants research assistant. "
-        "Prepare a concise, source-conscious historical brief. Include an executive summary, "
-        "chronology, key people, primary-source leads, citations, competing interpretations, "
-        "and unresolved questions. Clearly separate documented fact from interpretation. "
-        "Use no more than four web searches and prioritize authoritative repositories.\n\n"
-        f"Question: {question}\nScope: {scope}"
-    )
-
-
-def research_age_minutes(item):
+def parse_stage_outputs(item):
     try:
-        created = datetime.fromisoformat(item['created_at'])
-        return max(0.0, (datetime.now(UTC) - created).total_seconds() / 60.0)
-    except (TypeError, ValueError):
-        return float(RESEARCH_MAX_MINUTES)
+        return json.loads(item['stage_outputs'] or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
 
 
-def update_research(item_id, status, result, poll_errors=None, last_error=None):
-    now = datetime.now(UTC).isoformat()
-    assignments = ['status=?', 'result=?', 'updated_at=?']
-    values = [status, result, now]
-    if poll_errors is not None:
-        assignments.append('poll_errors=?')
-        values.append(poll_errors)
-    if last_error is not None:
-        assignments.append('last_error=?')
-        values.append(last_error)
-    values.append(item_id)
-    db().execute(
-        f"UPDATE research_requests SET {', '.join(assignments)} WHERE id=?",
-        tuple(values),
+def research_stage_prompt(item, stage_index):
+    stage = RESEARCH_STAGES[stage_index]
+    outputs = parse_stage_outputs(item)
+    prior = '\n\n'.join(
+        f"## {RESEARCH_STAGES[i]['label']}\n{outputs.get(RESEARCH_STAGES[i]['slug'],'')}"
+        for i in range(stage_index)
+        if outputs.get(RESEARCH_STAGES[i]['slug'])
     )
+    base = (
+        "You are one specialist in a nonpartisan editorial pipeline for the Society of Presidential Descendants. "
+        "The Society advances public understanding of presidential leadership, historic preservation, civic education, "
+        "and responsible stewardship of presidential family legacies. Distinguish documented fact, interpretation, and unresolved questions. "
+        "Do not advocate for a political party or contemporary candidate. Use concise, publication-useful prose.\n\n"
+        f"Research question: {item['question']}\nScope: {item['scope'] or 'No additional scope supplied.'}\n\n"
+    )
+    instructions = {
+        'plan': (
+            "Act as the Research Planning Editor. Produce: (1) precise research thesis, (2) 5-8 subquestions, "
+            "(3) key people, dates, institutions, and places, (4) primary-source repositories to search, "
+            "(5) political-sensitivity and lineage/privacy risks, and (6) a bounded evidence plan. Do not write the article."
+        ),
+        'evidence': (
+            "Act as the Evidence and Sources Editor. Use web search selectively. Build a source-conscious evidence packet with: "
+            "confirmed facts, source title, institution/publisher, URL, date where available, what each source supports, conflicting evidence, "
+            "and gaps. Prioritize the National Archives, Library of Congress, Founders Online, presidential libraries, official historic sites, "
+            "university archives, and reputable scholarship. Avoid unsupported claims and do not write finished narrative prose."
+        ),
+        'chronology': (
+            "Act as the Historical Analyst. Using only the supplied planning and evidence outputs, create: "
+            "(1) dated chronology, (2) fact matrix separating confirmed facts from interpretation, "
+            "(3) key-person relationship map in text, (4) disputed or unresolved points, and (5) fact-check priorities."
+        ),
+        'draft': (
+            "Act as an Associated Press-caliber historical feature editor. Draft a polished 900-1,200 word article suitable for the Society's "
+            "monthly newsletter and website. Include headline, deck, strong lead, clear chronology, human relevance, neutral tone, and source-aware wording. "
+            "Do not invent quotations. Use bracketed source markers such as [S1] tied to the evidence packet."
+        ),
+        'review': (
+            "Act as Managing Editor. Deliver the final editorial packet: (1) final headline and deck, (2) publication-ready article, "
+            "(3) source list matching citation markers, (4) fact-check checklist, (5) rights/privacy/political-neutrality review, "
+            "(6) unresolved questions, and (7) recommended newsletter section and web tags. Tighten prose; preserve factual caution."
+        ),
+    }
+    return base + instructions[stage['slug']] + (f"\n\nPrior approved pipeline output:\n{prior}" if prior else '')
+
+
+def research_stage_age_minutes(item):
+    try:
+        started = datetime.fromisoformat(item['stage_started_at'] or item['updated_at'] or item['created_at'])
+        return max(0.0, (datetime.now(UTC)-started).total_seconds()/60.0)
+    except (TypeError, ValueError):
+        return float(RESEARCH_STAGE_MINUTES)
+
+
+def update_research_fields(item_id, **fields):
+    if not fields:
+        return db().execute('SELECT * FROM research_requests WHERE id=?',(item_id,)).fetchone()
+    fields['updated_at']=datetime.now(UTC).isoformat()
+    sql=', '.join(f'{k}=?' for k in fields)
+    db().execute(f'UPDATE research_requests SET {sql} WHERE id=?', tuple(fields.values())+(item_id,))
     db().commit()
-    return db().execute(
-        'SELECT * FROM research_requests WHERE id=?', (item_id,)
-    ).fetchone()
+    return db().execute('SELECT * FROM research_requests WHERE id=?',(item_id,)).fetchone()
+
+
+def save_knowledge_record(item, final_packet):
+    if item['knowledge_saved']:
+        return
+    outputs=parse_stage_outputs(item)
+    now=datetime.now(UTC).isoformat()
+    source_packet=outputs.get('evidence','')
+    db().execute(
+        'INSERT INTO knowledge_records(research_request_id,subject,summary,source_packet,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+        (item['id'],item['question'],final_packet,source_packet,now,now),
+    )
+    db().execute('UPDATE research_requests SET knowledge_saved=1 WHERE id=?',(item['id'],))
+    db().commit()
+
+
+def start_pipeline_stage(item, stage_index):
+    if stage_index >= len(RESEARCH_STAGES):
+        final_packet=parse_stage_outputs(item).get('review','Research completed without a final packet.')
+        item=update_research_fields(item['id'],status='Completed',progress_label='Completed',result=final_packet,response_id=None,last_error='')
+        save_knowledge_record(item,final_packet)
+        return item
+    if not os.environ.get('OPENAI_API_KEY') or not OpenAI:
+        return update_research_fields(item['id'],status='Needs API Key',progress_label='Configuration Required',result='AI research is not activated. Suggested repositories: National Archives, Library of Congress, presidential libraries, Founders Online, Chronicling America, and relevant state historical societies.',last_error='OPENAI_API_KEY unavailable')
+    stage=RESEARCH_STAGES[stage_index]
+    now_dt=datetime.now(UTC)
+    try:
+        client=OpenAI(api_key=os.environ['OPENAI_API_KEY'],timeout=30.0,max_retries=1)
+        kwargs={
+            'model':RESEARCH_MODEL,
+            'input':research_stage_prompt(item,stage_index),
+            'background':True,
+            'store':True,
+            'max_output_tokens':stage['max_tokens'],
+        }
+        if stage['web']:
+            kwargs['tools']=[{'type':'web_search'}]
+            kwargs['max_tool_calls']=6
+        response=client.responses.create(**kwargs)
+        remote_status=getattr(response,'status',None)
+        return update_research_fields(
+            item['id'],pipeline_stage=stage_index,status='Queued' if remote_status=='queued' else 'In Progress',
+            progress_label=stage['label'],result=f"Stage {stage_index+1} of {len(RESEARCH_STAGES)}: {stage['label']} accepted.",
+            response_id=response.id,stage_started_at=now_dt.isoformat(),
+            stage_deadline_at=(now_dt+timedelta(minutes=RESEARCH_STAGE_MINUTES)).isoformat(),poll_errors=0,last_error=''
+        )
+    except Exception as exc:
+        app.logger.exception('Unable to start pipeline stage')
+        return update_research_fields(item['id'],status='Error',progress_label=f"{stage['label']} Failed",result=f"Unable to start {stage['label']}. Diagnostic: {type(exc).__name__}: {exc}",last_error=f'{type(exc).__name__}: {exc}')
 
 
 def refresh_research_request(item):
-    if not item or item['status'] not in ('Queued', 'In Progress'):
+    if not item or item['status'] not in ('Queued','In Progress'):
         return item
-
-    age = research_age_minutes(item)
-    if age >= RESEARCH_MAX_MINUTES:
-        return update_research(
-            item['id'],
-            'Error',
-            'Research exceeded the nine-minute processing limit and was stopped. '
-            'Submit a narrower question or divide the request into sections.',
-            last_error='Maximum runtime exceeded',
-        )
-
-    key = os.environ.get('OPENAI_API_KEY')
-    if not key or not OpenAI:
-        return update_research(
-            item['id'],
-            'Error',
-            'Research service is not configured.',
-            last_error='OPENAI_API_KEY unavailable',
-        )
-
+    stage_index=int(item['pipeline_stage'] or 0)
+    stage=RESEARCH_STAGES[min(stage_index,len(RESEARCH_STAGES)-1)]
+    age=research_stage_age_minutes(item)
+    if age >= RESEARCH_STAGE_MINUTES:
+        return update_research_fields(item['id'],status='Error',progress_label=f"{stage['label']} Timed Out",result=f"{stage['label']} exceeded the {RESEARCH_STAGE_MINUTES}-minute stage limit. Narrow the request or retry this stage.",last_error='Stage runtime exceeded')
     try:
-        client = OpenAI(api_key=key, timeout=20.0, max_retries=1)
-        response = client.responses.retrieve(item['response_id'])
-        remote_status = getattr(response, 'status', None)
-
-        if remote_status == 'completed':
-            output = getattr(response, 'output_text', '') or 'Research completed without text output.'
-            return update_research(item['id'], 'Completed', output, poll_errors=0, last_error='')
-
-        if remote_status in ('failed', 'cancelled', 'incomplete'):
-            detail = (
-                getattr(response, 'error', None)
-                or getattr(response, 'incomplete_details', None)
-                or remote_status
-            )
-            return update_research(
-                item['id'],
-                'Error',
-                f'Research service ended with status {remote_status}: {detail}',
-                last_error=str(detail),
-            )
-
-        return update_research(
-            item['id'],
-            'In Progress',
-            f'Research is processing. Elapsed time: {age:.1f} minutes. '
-            f'Maximum permitted time: {RESEARCH_MAX_MINUTES} minutes.',
-        )
-
+        client=OpenAI(api_key=os.environ['OPENAI_API_KEY'],timeout=20.0,max_retries=1)
+        response=client.responses.retrieve(item['response_id'])
+        remote_status=getattr(response,'status',None)
+        if remote_status=='completed':
+            output=getattr(response,'output_text','') or 'Stage completed without text output.'
+            outputs=parse_stage_outputs(item); outputs[stage['slug']]=output
+            item=update_research_fields(item['id'],stage_outputs=json.dumps(outputs),result=output,poll_errors=0,last_error='',response_id=None)
+            return start_pipeline_stage(item,stage_index+1)
+        if remote_status=='incomplete':
+            partial=getattr(response,'output_text','') or ''
+            detail=getattr(response,'incomplete_details',None)
+            if partial.strip():
+                outputs=parse_stage_outputs(item); outputs[stage['slug']]=partial+f"\n\n[Stage ended incomplete: {detail}]"
+                item=update_research_fields(item['id'],stage_outputs=json.dumps(outputs),result=partial,last_error=str(detail),response_id=None)
+                return start_pipeline_stage(item,stage_index+1)
+            return update_research_fields(item['id'],status='Error',progress_label=f"{stage['label']} Incomplete",result=f"{stage['label']} ended incomplete without usable output: {detail}",last_error=str(detail))
+        if remote_status in ('failed','cancelled'):
+            detail=getattr(response,'error',None) or remote_status
+            return update_research_fields(item['id'],status='Error',progress_label=f"{stage['label']} Failed",result=f"{stage['label']} ended with status {remote_status}: {detail}",last_error=str(detail))
+        return update_research_fields(item['id'],status='In Progress',progress_label=stage['label'],result=f"Stage {stage_index+1} of {len(RESEARCH_STAGES)}: {stage['label']} is processing ({age:.1f} minutes elapsed).")
     except Exception as exc:
-        errors = int(item['poll_errors'] or 0) + 1
-        message = f'{type(exc).__name__}: {exc}'
-        if errors >= 3 or age >= 2.0:
-            return update_research(
-                item['id'],
-                'Error',
-                'The research status could not be retrieved after repeated attempts. '
-                f'Diagnostic: {message}',
-                poll_errors=errors,
-                last_error=message,
-            )
-        app.logger.warning('Research status refresh attempt %s failed: %s', errors, exc)
-        return update_research(
-            item['id'],
-            'In Progress',
-            f'Temporary status-check failure; retrying automatically ({errors}/3).',
-            poll_errors=errors,
-            last_error=message,
-        )
+        errors=int(item['poll_errors'] or 0)+1; message=f'{type(exc).__name__}: {exc}'
+        if errors>=3:
+            return update_research_fields(item['id'],status='Error',progress_label=f"{stage['label']} Status Error",result=f"Status retrieval failed after {errors} attempts. Diagnostic: {message}",poll_errors=errors,last_error=message)
+        return update_research_fields(item['id'],status='In Progress',result=f"Temporary status-check failure; retrying ({errors}/3).",poll_errors=errors,last_error=message)
 
 
-@app.route('/editor/research', methods=['GET', 'POST'])
+@app.route('/editor/research',methods=['GET','POST'])
 @admin_required
 def research_assistant():
-    enabled = bool(os.environ.get('OPENAI_API_KEY')) and OpenAI is not None
+    enabled=bool(os.environ.get('OPENAI_API_KEY')) and OpenAI is not None
+    if request.method=='POST':
+        question=request.form['question'].strip(); scope=request.form.get('scope','').strip(); now=datetime.now(UTC).isoformat()
+        cur=db().execute(
+            "INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id,deadline_at,poll_errors,last_error,pipeline_stage,stage_outputs,progress_label,knowledge_saved) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (session['user_id'],question,scope,'Queued','Research pipeline created.',now,now,None,None,0,None,0,'{}','Planning',0)
+        ); db().commit(); request_id=cur.lastrowid
+        item=db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone()
+        item=start_pipeline_stage(item,0)
+        audit('Created','research_request',request_id,item['status'])
+        return redirect(url_for('research_assistant',request_id=request_id))
+    request_id=request.args.get('request_id',type=int)
+    result=db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone() if request_id else None
+    result=refresh_research_request(result)
+    outputs=parse_stage_outputs(result) if result else {}
+    stage_cards=[{'label':stage['label'],'content':outputs.get(stage['slug'],'')} for stage in RESEARCH_STAGES if outputs.get(stage['slug'])]
+    history=db().execute('SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20').fetchall()
+    return render_template('research.html',result=result,history=history,enabled=enabled,stage_cards=stage_cards,stages=RESEARCH_STAGES,stage_minutes=RESEARCH_STAGE_MINUTES)
 
-    if request.method == 'POST':
-        question = request.form['question'].strip()
-        scope = request.form.get('scope', '').strip()
-        now_dt = datetime.now(UTC)
-        now = now_dt.isoformat()
-        deadline = (now_dt + timedelta(minutes=RESEARCH_MAX_MINUTES)).isoformat()
-        status = 'Needs API Key'
-        result_text = ('AI research is not activated. Suggested repositories: National Archives, ''Library of Congress, presidential libraries, Founders Online, Chronicling America, ''and relevant state historical societies.')
-        response_id = None
-        last_error = None
 
-        if enabled:
-            try:
-                client = OpenAI(
-                    api_key=os.environ['OPENAI_API_KEY'],
-                    timeout=30.0,
-                    max_retries=1,
-                )
-                response = client.responses.create(
-                    model=os.environ.get('OPENAI_RESEARCH_MODEL', 'gpt-5-mini'),
-                    tools=[{'type': 'web_search'}],
-                    input=research_prompt(question, scope),
-                    background=True,
-                    store=True,
-                    max_tool_calls=4,
-                    max_output_tokens=3500,
-                )
-                response_id = response.id
-                remote_status = getattr(response, 'status', None)
-                status = 'Queued' if remote_status == 'queued' else 'In Progress'
-                result_text = (
-                    'Research accepted. The job has a fixed nine-minute maximum runtime '
-                    'and will always end as Completed or Error.'
-                )
-            except Exception as exc:
-                app.logger.exception('Unable to start research')
-                status = 'Error'
-                last_error = f'{type(exc).__name__}: {exc}'
-                result_text = 'Research could not start. Diagnostic: ' + last_error
-
-        sql = (
-            "INSERT INTO research_requests "
-            "(user_id,question,scope,status,result,created_at,updated_at,response_id,"
-            "deadline_at,poll_errors,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-        )
-        cur = db().execute(
-            sql,
-            (
-                session['user_id'], question, scope, status, result_text, now, now,
-                response_id, deadline, 0, last_error,
-            ),
-        )
-        db().commit()
-        request_id = cur.lastrowid
-        audit('Created', 'research_request', request_id, status)
-        return redirect(url_for('research_assistant', request_id=request_id))
-
-    request_id = request.args.get('request_id', type=int)
-    result = (
-        db().execute(
-            'SELECT * FROM research_requests WHERE id=?', (request_id,)
-        ).fetchone()
-        if request_id else None
-    )
-    result = refresh_research_request(result)
-    history = db().execute(
-        'SELECT * FROM research_requests ORDER BY created_at DESC LIMIT 20'
-    ).fetchall()
-    return render_template(
-        'research.html',
-        result=result,
-        history=history,
-        enabled=enabled,
-        max_minutes=RESEARCH_MAX_MINUTES,
-    )
+@app.route('/editor/knowledge')
+@admin_required
+def knowledge_library():
+    q=request.args.get('q','').strip(); sql='SELECT * FROM knowledge_records'; params=[]
+    if q:
+        sql+=' WHERE subject LIKE ? OR summary LIKE ?'; params=[f'%{q}%',f'%{q}%']
+    rows=db().execute(sql+' ORDER BY updated_at DESC',params).fetchall()
+    return render_template('knowledge.html',rows=rows,q=q)
 
 
 @app.route('/editor/audit')

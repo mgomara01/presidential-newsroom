@@ -1,0 +1,7 @@
+{% extends 'base.html' %}
+{% block title %}Historical Knowledge Library{% endblock %}
+{% block content %}
+<section class="admin-head"><div class="wrap"><div><div class="eyebrow">INSTITUTIONAL MEMORY</div><h1>Historical Knowledge Library</h1><p>Completed research packets and reusable evidence collections.</p></div><a class="button" href="{{url_for('research_assistant')}}">New Research</a></div></section>
+<section class="wrap section"><form method="get" class="searchbar"><input name="q" value="{{q}}" placeholder="Search subjects and completed packets"><button class="button">Search</button></form></section>
+<section class="wrap section">{% for row in rows %}<article class="panel"><div class="eyebrow">{{row.updated_at[:10]}}</div><h2>{{row.subject}}</h2><details><summary><strong>Final editorial packet</strong></summary><pre class="research-output">{{row.summary}}</pre></details>{% if row.source_packet %}<details><summary><strong>Evidence and sources</strong></summary><pre class="research-output">{{row.source_packet}}</pre></details>{% endif %}</article>{% else %}<div class="panel"><p>No completed knowledge records yet.</p></div>{% endfor %}</section>
+{% endblock %}

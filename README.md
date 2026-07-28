@@ -98,3 +98,11 @@ No agent should directly publish. The `Published` state remains a human editoria
 - OpenAI Responses API integration with built-in web search when `OPENAI_API_KEY` is configured
 - Graceful research-packet mode when the API key is absent
 - Research prompts require chronology, primary-source leads, citations, and explicit separation of fact, interpretation, and unresolved questions
+
+## Version 6 Agentic Editorial Pipeline
+Five bounded stages: planning, evidence collection, chronology/fact matrix, editorial drafting, and managing-editor review. Completed packets and evidence are saved to the Historical Knowledge Library. Each stage has an independent timeout and partial outputs are retained when usable.
+
+
+## Version 6 Agentic Editorial Pipeline
+Five bounded stages: planning, evidence collection, chronology/fact matrix, editorial drafting, and managing-editor review. Completed packets and evidence are saved to the Historical Knowledge Library. Each stage has an independent timeout and partial outputs are retained when usable.
+

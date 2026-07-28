@@ -213,18 +213,93 @@ class NewsroomTestCase(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
             self.assertTrue(FakeOpenAI.shared_responses.create_kwargs['background'])
             request_id = int(response.location.rsplit('=', 1)[1])
-            page = self.client.get(response.location)
-            self.assertEqual(page.status_code, 200)
+            page = None
+            for _ in range(6):
+                page = self.client.get(response.location)
+                self.assertEqual(page.status_code, 200)
             self.assertIn(b'Completed research packet', page.data)
             with self.module.app.app_context():
                 row = self.module.db().execute(
                     'SELECT * FROM research_requests WHERE id=?', (request_id,)
                 ).fetchone()
+                knowledge = self.module.db().execute(
+                    'SELECT * FROM knowledge_records WHERE research_request_id=?', (request_id,)
+                ).fetchone()
             self.assertEqual(row['status'], 'Completed')
-            self.assertEqual(row['response_id'], 'resp_test_123')
+            self.assertEqual(row['pipeline_stage'], 4)
+            self.assertIsNone(row['response_id'])
+            self.assertIsNotNone(knowledge)
         finally:
             self.module.OpenAI = original_openai
             os.environ.pop('OPENAI_API_KEY', None)
+
+    def test_research_incomplete_partial_advances_stage(self):
+        class Partial:
+            status='incomplete'; output_text='Usable planning output'; incomplete_details='max_output_tokens'
+        class Created:
+            id='resp_partial'; status='queued'
+        class Responses:
+            def create(self,**kwargs): return Created()
+            def retrieve(self,response_id): return Partial()
+        class FakeOpenAI:
+            def __init__(self,**kwargs): self.responses=Responses()
+        self.login(); original=self.module.OpenAI; os.environ['OPENAI_API_KEY']='test-key'; self.module.OpenAI=FakeOpenAI
+        try:
+            response=self.client.post('/editor/research',data={'question':'Partial test','scope':'bounded'},follow_redirects=False)
+            self.client.get(response.location)
+            request_id=int(response.location.rsplit('=',1)[1])
+            with self.module.app.app_context():
+                row=self.module.db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone()
+            self.assertEqual(row['pipeline_stage'],1)
+            self.assertIn('Usable planning output',row['stage_outputs'])
+        finally:
+            self.module.OpenAI=original; os.environ.pop('OPENAI_API_KEY',None)
+
+    def test_research_stage_timeout_becomes_error(self):
+        self.login(); os.environ['OPENAI_API_KEY']='test-key'
+        old=(self.module.datetime.now(self.module.UTC)-self.module.timedelta(minutes=20)).isoformat()
+        with self.module.app.app_context():
+            cur=self.module.db().execute("INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id,pipeline_stage,stage_outputs,stage_started_at,progress_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(1,'Timeout test','scope','In Progress','running',old,old,'resp_old',0,'{}',old,'Planning'))
+            self.module.db().commit(); request_id=cur.lastrowid
+        page=self.client.get(f'/editor/research?request_id={request_id}')
+        self.assertIn(b'Timed Out',page.data)
+        with self.module.app.app_context():
+            row=self.module.db().execute('SELECT status FROM research_requests WHERE id=?',(request_id,)).fetchone()
+        self.assertEqual(row['status'],'Error'); os.environ.pop('OPENAI_API_KEY',None)
+
+    def test_research_incomplete_partial_advances_stage(self):
+        class Partial:
+            status='incomplete'; output_text='Usable planning output'; incomplete_details='max_output_tokens'
+        class Created:
+            id='resp_partial'; status='queued'
+        class Responses:
+            def create(self,**kwargs): return Created()
+            def retrieve(self,response_id): return Partial()
+        class FakeOpenAI:
+            def __init__(self,**kwargs): self.responses=Responses()
+        self.login(); original=self.module.OpenAI; os.environ['OPENAI_API_KEY']='test-key'; self.module.OpenAI=FakeOpenAI
+        try:
+            response=self.client.post('/editor/research',data={'question':'Partial test','scope':'bounded'},follow_redirects=False)
+            self.client.get(response.location)
+            request_id=int(response.location.rsplit('=',1)[1])
+            with self.module.app.app_context():
+                row=self.module.db().execute('SELECT * FROM research_requests WHERE id=?',(request_id,)).fetchone()
+            self.assertEqual(row['pipeline_stage'],1)
+            self.assertIn('Usable planning output',row['stage_outputs'])
+        finally:
+            self.module.OpenAI=original; os.environ.pop('OPENAI_API_KEY',None)
+
+    def test_research_stage_timeout_becomes_error(self):
+        self.login(); os.environ['OPENAI_API_KEY']='test-key'
+        old=(self.module.datetime.now(self.module.UTC)-self.module.timedelta(minutes=20)).isoformat()
+        with self.module.app.app_context():
+            cur=self.module.db().execute("INSERT INTO research_requests(user_id,question,scope,status,result,created_at,updated_at,response_id,pipeline_stage,stage_outputs,stage_started_at,progress_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(1,'Timeout test','scope','In Progress','running',old,old,'resp_old',0,'{}',old,'Planning'))
+            self.module.db().commit(); request_id=cur.lastrowid
+        page=self.client.get(f'/editor/research?request_id={request_id}')
+        self.assertIn(b'Timed Out',page.data)
+        with self.module.app.app_context():
+            row=self.module.db().execute('SELECT status FROM research_requests WHERE id=?',(request_id,)).fetchone()
+        self.assertEqual(row['status'],'Error'); os.environ.pop('OPENAI_API_KEY',None)
 
     def test_member_can_use_portal_but_not_editor(self):
         self.login()
