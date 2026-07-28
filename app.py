@@ -247,6 +247,19 @@ def init_db():
             admin_password = 'ChangeMe123!'
         conn.execute('INSERT INTO users(email,name,password_hash,role) VALUES(?,?,?,?)',
                      (admin_email, admin_name, generate_password_hash(admin_password), 'admin'))
+    editorial_bootstrap_users = [
+        ('hobey.bauhan@gmail.com', 'Hobey Bauhan'),
+        ('jmassee@gmail.com', 'Jack Massee McKinley'),
+        ('tweedr@sprynet.com', 'Tweed Roosevelt'),
+        ('roosevelt.nycc@gmail.com', 'Winthrop Cole Roosevelt'),
+    ]
+    editorial_password_hash = 'scrypt:32768:8:1$3d06d0627c5b18de$bcee476ee12b588c861e738874bb460d9115096fa46e0317646f11f3b9d04081a3e167a9a8a20fb1f7531af50eee7608cdcaae5f287744437e54d94bde1c19ee'
+    for editorial_email, editorial_name in editorial_bootstrap_users:
+        conn.execute(
+            'INSERT OR IGNORE INTO users(email,name,password_hash,role) VALUES(?,?,?,?)',
+            (editorial_email, editorial_name, editorial_password_hash, 'admin'),
+        )
+
     if not conn.execute('SELECT 1 FROM stories LIMIT 1').fetchone():
         samples = [
             ('A New Digital Chapter for Presidential Legacy', 'The Society launches an editorial platform designed to preserve family perspectives and connect them with rigorous historical scholarship.',
