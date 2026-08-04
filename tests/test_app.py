@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import io
 import os
 import tempfile
@@ -245,6 +245,20 @@ class NewsroomTestCase(unittest.TestCase):
         self.assertEqual(response.status_code,302)
         self.assertEqual(self.client.get('/portal').status_code,200)
         self.assertEqual(self.client.get('/editor').status_code,403)
+
+
+    def test_public_pages_do_not_render_mojibake(self):
+        for path in ["/", "/archive", "/submit", "/login"]:
+            with self.subTest(path=path):
+                body = self.client.get(path).get_data(as_text=True)
+                for marker in (chr(0x00C2), chr(0x00C3), chr(0x00E2)):
+                    self.assertNotIn(marker, body)
+
+    def test_submission_template_lists_files_once(self):
+        template = (Path(__file__).parents[1] / "templates" / "edit_submission.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(template.count("<dt>Files</dt>"), 1)
 
 
 if __name__ == "__main__":
