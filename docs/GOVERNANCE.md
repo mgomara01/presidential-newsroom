@@ -1,1 +1,1 @@
-Approval matrix, agent limits, evidence gates, editorial controls, security, backups, incidents, rollback, and production restrictions.
+Approval matrix, agent boundaries, evidence gates, editorial controls, security, backup, incident response, rollback, and production restrictions.
