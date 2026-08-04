@@ -1,1 +1,1 @@
-Approval matrix, agent boundaries, evidence gates, editorial controls, security, backup, incident response, rollback, and production restrictions.
+Existing governance-only onboarding artifact.
