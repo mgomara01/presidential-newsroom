@@ -1,1 +1,1 @@
-Defines approvals, agent boundaries, evidence gates, editorial controls, incident response, backups, rollback, and production hold points.
+Approval matrix, agent limits, evidence gates, editorial controls, security, backups, incidents, rollback, and production restrictions.
